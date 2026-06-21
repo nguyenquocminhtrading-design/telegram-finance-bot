@@ -11,6 +11,7 @@ from database import add_asset
 from asset_manager import get_asset_summary, liquidate_asset
 from finance_logic import get_balance, get_monthly_summary, get_category_breakdown
 from gsheets_sync import sync_expense_to_gsheet, sync_asset_to_gsheet
+from simulation import run_monte_carlo, generate_projection_chart
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 
@@ -54,6 +55,7 @@ def cmd_help(message: Message):
         "📈 *Reports & Status:*\n"
         "  `/balance` - Current balance\n"
         "  `/report` - Monthly report\n"
+        "  `/project <amount> <months>` - Monte Carlo Projection\n"
         "  `/export` - Export to Excel\n"
         "  `/web` - Dashboard link\n"
         "─────────────────────────────"
@@ -111,6 +113,52 @@ def cmd_web(message: Message):
         bot.reply_to(message, f"Dashboard: {base}/dashboard\nOr open Mini App below:", reply_markup=markup)
     else:
         bot.reply_to(message, f"Dashboard: {base}/dashboard\n(Mini App requires HTTPS webhook URL)")
+
+@bot.message_handler(commands=["project", "montecarlo"])
+def cmd_project(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    parts = message.text.split()
+    monthly_contribution = 5000000 # default 5tr
+    months = 60 # default 60 months
+    
+    if len(parts) >= 2:
+        try:
+            monthly_contribution = parse_amount(parts[1])
+        except ValueError:
+            pass
+            
+    if len(parts) >= 3:
+        try:
+            months = int(parts[2])
+        except ValueError:
+            pass
+            
+    bot.reply_to(message, f"🏃 Running Monte Carlo simulation...\n"
+                          f"Monthly Contribution: {monthly_contribution:,.0f} VND\n"
+                          f"Period: {months} months")
+                          
+    # Get current active assets value
+    summary = get_asset_summary()
+    current_portfolio_value = summary['total_current']
+    
+    # Run simulation
+    paths = run_monte_carlo(current_portfolio_value, monthly_contribution, months=months)
+    chart_buf, stats = generate_projection_chart(paths, monthly_contribution)
+    
+    # Build reply text
+    text = (
+        f"📊 **Projection Results ({months} Months)** 📊\n\n"
+        f"Starting Portfolio: {current_portfolio_value:,.0f} VND\n"
+        f"Monthly Added: {monthly_contribution:,.0f} VND\n"
+        f"Total Capital Invested: {stats['capital']:,.0f} VND\n\n"
+        f"📉 Worst Case (10%): {stats['p10']:,.0f} VND\n"
+        f"📈 **Expected (Median): {stats['median']:,.0f} VND**\n"
+        f"🚀 Best Case (90%): {stats['p90']:,.0f} VND"
+    )
+    
+    bot.send_photo(message.chat.id, photo=chart_buf, caption=text, parse_mode="Markdown")
 
 @bot.message_handler(commands=["liquidate"])
 def cmd_liquidate(message: Message):
