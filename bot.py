@@ -10,7 +10,7 @@ from database import add_transaction, get_transactions, get_assets, get_categori
 from database import add_asset
 from asset_manager import get_asset_summary, liquidate_asset
 from finance_logic import get_balance, get_monthly_summary, get_category_breakdown
-from excel_sync import sync_expense_to_excel, sync_asset_to_portfolio
+from gsheets_sync import sync_expense_to_gsheet, sync_asset_to_gsheet
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 
@@ -207,8 +207,8 @@ def cmd_buy(message: Message):
     # Capitalize it
     aid = add_asset(message.from_user.id, tid, asset_name, total_value, 1) # Depreciate in 1 month (or could be 0, but logic expects >0)
     
-    # Sync to Portfolio Excel
-    sync_asset_to_portfolio({
+    # Sync to Portfolio Google Sheet
+    sync_asset_to_gsheet({
         "date": datetime.now().isoformat()[:10],
         "name": asset_name,
         "value": total_value,
@@ -293,8 +293,8 @@ def handle_callback(call):
         
         tid = add_transaction(uid, amount, cat, desc, is_asset=0, bank_account=bank)
         
-        # Sync to Expense Excel
-        sync_expense_to_excel({
+        # Sync to Expense Google Sheet
+        sync_expense_to_gsheet({
             "date": datetime.now().isoformat()[:10],
             "amount": amount,
             "category": cat,
@@ -386,8 +386,8 @@ def handle_capitalize_flow(message: Message):
             f"Use /asset to track it.",
         )
         
-        # Sync to Portfolio Excel
-        sync_asset_to_portfolio({
+        # Sync to Portfolio Google Sheet
+        sync_asset_to_gsheet({
             "date": datetime.now().isoformat()[:10],
             "name": name,
             "value": value,
