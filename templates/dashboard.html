@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Finance Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <!-- Include Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <nav class="sidebar">
+        <h2><span>Finance</span></h2>
+        <a href="/dashboard" class="active"><span>Dashboard</span></a>
+        <a href="/transactions"><span>Transactions</span></a>
+        <a href="/assets"><span>Assets</span></a>
+        <a href="/reports"><span>Reports</span></a>
+        <a href="/settings"><span>Settings</span></a>
+    </nav>
+    <div class="main-content">
+        <div class="header-bar">
+            <h1>Dashboard</h1>
+            <div class="header-right">
+                <a href="/api/export/excel" class="btn-export">Export to Excel</a>
+                <div class="balance-display {% if report.balance < 0 %}negative{% endif %}">
+                    {{ "{:,.0f}".format(report.balance) }} VND
+                </div>
+            </div>
+        </div>
+
+        <div class="cards">
+            <div class="card">
+                <h3>Monthly Income</h3>
+                <div class="value positive">+{{ "{:,.0f}".format(report.monthly.income) }}</div>
+            </div>
+            <div class="card">
+                <h3>Monthly Expense</h3>
+                <div class="value negative">-{{ "{:,.0f}".format(report.monthly.expense) }}</div>
+            </div>
+            <div class="card">
+                <h3>Monthly Net</h3>
+                <div class="value {% if report.monthly.net >= 0 %}positive{% else %}negative{% endif %}">
+                    {{ "{:+,.0f}".format(report.monthly.net) }}
+                </div>
+            </div>
+            <div class="card">
+                <h3>Active Assets</h3>
+                <div class="value" style="color:#3b82f6;">{{ assets.active_count }}</div>
+            </div>
+        </div>
+
+        <div class="charts-row">
+            <div class="chart-card">
+                <h3>Spending by Category</h3>
+                <canvas id="categoryChart" height="250"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>Monthly Cash Flow</h3>
+                <canvas id="cashFlowChart" height="250"></canvas>
+            </div>
+        </div>
+
+        {% if assets.assets %}
+        <div class="chart-card" style="margin-top: 20px;">
+            <h3>Depreciating Assets</h3>
+            <table>
+                <tr><th>Name</th><th>Original</th><th>Current</th><th>Progress</th></tr>
+                {% for a in assets.assets %}
+                {% if a.is_active %}
+                <tr>
+                    <td>{{ a.name }}</td>
+                    <td>{{ "{:,.0f}".format(a.original_value) }}</td>
+                    <td>{{ "{:,.0f}".format(a.current_value) }}</td>
+                    <td>
+                        {% set pct = ((a.original_value - a.current_value) / a.original_value * 100) %}
+                        <div class="asset-progress">
+                            <div class="asset-progress-bar" style="width: {{ pct }}%;"></div>
+                        </div>
+                        <small>{{ "%.0f"|format(pct) }}% Depreciated</small>
+                    </td>
+                </tr>
+                {% endif %}
+                {% endfor %}
+            </table>
+        </div>
+        {% endif %}
+    </div>
+    <script src="/static/js/chart.js"></script>
+    <script>
+        const report = {{ report | tojson }};
+        initDashboardCharts(report);
+    </script>
+</body>
+</html>

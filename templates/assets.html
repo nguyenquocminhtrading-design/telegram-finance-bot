@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Assets</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <nav class="sidebar">
+        <h2><span>Finance</span></h2>
+        <a href="/dashboard"><span>Dashboard</span></a>
+        <a href="/transactions"><span>Transactions</span></a>
+        <a href="/assets" class="active"><span>Assets</span></a>
+        <a href="/reports"><span>Reports</span></a>
+        <a href="/settings"><span>Settings</span></a>
+    </nav>
+    <div class="main-content">
+        <div class="header-bar">
+            <h1>Capitalized Assets</h1>
+            <div>
+                <span style="margin-right:20px;">Original: <strong>{{ "{:,.0f}".format(summary.total_original) }}</strong></span>
+                <span>Current: <strong>{{ "{:,.0f}".format(summary.total_current) }}</strong></span>
+            </div>
+        </div>
+
+        <div class="cards">
+            <div class="card">
+                <h3>Active Assets</h3>
+                <div class="value" style="color:#0984e3;">{{ summary.active_count }}</div>
+            </div>
+            <div class="card">
+                <h3>Total Assets</h3>
+                <div class="value">{{ summary.total_assets }}</div>
+            </div>
+            <div class="card">
+                <h3>Total Original Value</h3>
+                <div class="value">{{ "{:,.0f}".format(summary.total_original) }}</div>
+            </div>
+            <div class="card">
+                <h3>Total Current Value</h3>
+                <div class="value">{{ "{:,.0f}".format(summary.total_current) }}</div>
+            </div>
+        </div>
+
+        <table>
+            <tr>
+                <th>Name</th>
+                <th>Original Value</th>
+                <th>Current Value</th>
+                <th>Monthly Depr.</th>
+                <th>Progress</th>
+                <th>Status</th>
+            </tr>
+            {% for a in summary.assets %}
+            <tr>
+                <td><strong>{{ a.name }}</strong></td>
+                <td>{{ "{:,.0f}".format(a.original_value) }}</td>
+                <td>{{ "{:,.0f}".format(a.current_value) }}</td>
+                <td>{{ "{:,.0f}".format(a.monthly_depreciation) }}</td>
+                <td style="min-width:150px;">
+                    {% set pct = ((a.original_value - a.current_value) / a.original_value * 100) %}
+                    <div class="asset-progress">
+                        <div class="asset-progress-bar" style="width: {{ pct }}%;"></div>
+                    </div>
+                    {{ "%.0f"|format(pct) }}%
+                </td>
+                <td>
+                    {% if a.is_active %}
+                    <span class="badge" style="background:#00b89422;color:#00b894;">Active</span>
+                    {% else %}
+                    <span class="badge" style="background:#636e7222;color:#636e72;">Depreciated</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            {% if not summary.assets %}
+            <tr><td colspan="6" style="text-align:center;color:#636e72;">No assets. Capitalize a large purchase via Telegram bot.</td></tr>
+            {% endif %}
+        </table>
+    </div>
+</body>
+</html>

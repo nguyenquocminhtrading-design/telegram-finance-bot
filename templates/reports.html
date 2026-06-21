@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reports</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <nav class="sidebar">
+        <h2><span>Finance</span></h2>
+        <a href="/dashboard"><span>Dashboard</span></a>
+        <a href="/transactions"><span>Transactions</span></a>
+        <a href="/assets"><span>Assets</span></a>
+        <a href="/reports" class="active"><span>Reports</span></a>
+        <a href="/settings"><span>Settings</span></a>
+    </nav>
+    <div class="main-content">
+        <div class="header-bar">
+            <h1>Financial Reports</h1>
+        </div>
+
+        <div class="charts-row">
+            <div class="chart-card">
+                <h3>Cash Flow Trend</h3>
+                <canvas id="cashFlowTrend" width="500" height="250"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>Income vs Expense</h3>
+                <canvas id="incomeVsExpense" width="500" height="250"></canvas>
+            </div>
+        </div>
+
+        <div class="charts-row">
+            <div class="chart-card">
+                <h3>Top Spending Categories</h3>
+                <canvas id="topCategoriesChart" width="300" height="300"></canvas>
+                <div id="topCategoriesChart-legend"></div>
+            </div>
+            <div class="chart-card">
+                <h3>Net Balance Trend</h3>
+                <canvas id="netBalanceChart" width="500" height="250"></canvas>
+            </div>
+        </div>
+
+        <div class="chart-card" style="margin-top:20px;">
+            <h3>Monthly Breakdown</h3>
+            <table>
+                <tr><th>Month</th><th>Income</th><th>Expense</th><th>Net</th></tr>
+                {% for m in report.cash_flow %}
+                <tr>
+                    <td>{{ m.label }}</td>
+                    <td style="color:#00b894;">+{{ "{:,.0f}".format(m.income) }}</td>
+                    <td style="color:#d63031;">-{{ "{:,.0f}".format(m.expense) }}</td>
+                    <td style="color:{% if m.net >= 0 %}#00b894{% else %}#d63031{% endif %};">
+                        {{ "{:+,.0f}".format(m.net) }}
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+        </div>
+    </div>
+    <script src="/static/js/chart.js"></script>
+    <script>
+        const report = {{ report | tojson }};
+        const cf = report.cash_flow || [];
+        const labels = cf.map(c => c.label);
+        const income = cf.map(c => c.income);
+        const expense = cf.map(c => c.expense);
+        const net = cf.map(c => c.net);
+
+        drawBarChart("cashFlowTrend", labels, income, expense);
+        drawLineChart("incomeVsExpense", labels, income, "#00b894");
+        drawLineChart("incomeVsExpense", labels, expense, "#d63031");
+        drawLineChart("netBalanceChart", labels, net, "#0984e3");
+
+        const cats = report.categories || [];
+        drawPieChart("topCategoriesChart", cats.map(c => c.total), cats.map(c => c.category));
+    </script>
+</body>
+</html>

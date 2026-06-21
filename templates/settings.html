@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <nav class="sidebar">
+        <h2><span>Finance</span></h2>
+        <a href="/dashboard"><span>Dashboard</span></a>
+        <a href="/transactions"><span>Transactions</span></a>
+        <a href="/assets"><span>Assets</span></a>
+        <a href="/reports"><span>Reports</span></a>
+        <a href="/settings" class="active"><span>Settings</span></a>
+    </nav>
+    <div class="main-content">
+        <div class="header-bar">
+            <h1>Settings</h1>
+        </div>
+
+        <div class="card" style="max-width:600px;">
+            <h3>System Information</h3>
+            <table style="box-shadow:none;">
+                <tr><td>Database</td><td><code>instance/finance.db</code></td></tr>
+                <tr><td>Auto-backup</td><td>Daily at 02:00</td></tr>
+                <tr><td>Depreciation</td><td>1st of each month</td></tr>
+                <tr><td>Telegram Bot</td><td>Active (webhook mode)</td></tr>
+            </table>
+        </div>
+
+        <div class="card" style="max-width:600px;margin-top:20px;">
+            <h3>Quick Actions</h3>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                <button class="btn btn-success" onclick="runDepreciation()">Run Depreciation Now</button>
+                <button class="btn btn-primary" onclick="exportData()">Export to Excel</button>
+            </div>
+        </div>
+
+        <div class="card" style="max-width:600px;margin-top:20px;">
+            <h3>Setup Instructions</h3>
+            <ol style="padding-left:20px;line-height:1.8;">
+                <li>Create a bot via <a href="https://t.me/BotFather" target="_blank">@BotFather</a></li>
+                <li>Copy token to <code>.env</code> file</li>
+                <li>Run <code>python app.py</code> locally to test</li>
+                <li>Deploy on PythonAnywhere</li>
+                <li>Set webhook via Telegram API</li>
+            </ol>
+        </div>
+    </div>
+
+    <script>
+        function runDepreciation() {
+            fetch("/api/run-depreciation", { method: "POST" })
+                .then(r => r.json())
+                .then(data => {
+                    alert(`Depreciation applied to ${data.depreciated} assets.`);
+                    location.reload();
+                });
+        }
+
+        function exportData() {
+            alert("Export feature: use the Telegram /export command or check the database file.");
+        }
+    </script>
+</body>
+</html>
