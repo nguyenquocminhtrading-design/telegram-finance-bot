@@ -6,10 +6,11 @@ import io
 import openpyxl
 
 from config import TELEGRAM_TOKEN, ADMIN_USER_ID, WEBHOOK_URL
-from database import add_transaction, get_transactions, get_assets, get_categories
+from database import add_transaction, get_transactions, get_assets, get_categories, update_transaction
 from database import add_asset
 from asset_manager import get_asset_summary, liquidate_asset
 from finance_logic import get_balance, get_monthly_summary, get_category_breakdown
+from excel_sync import sync_expense_to_excel, sync_asset_to_portfolio
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 
@@ -32,22 +33,32 @@ def cmd_start(message: Message):
     if not is_admin(message.from_user.id):
         bot.reply_to(message, "Access denied.")
         return
-    bot.reply_to(
-        message,
-        "Welcome to Personal Finance Bot!\n\n"
-        "Send transactions like:\n"
-        "+500 salary March\n"
-        "-200 lunch\n"
-        "-10000 laptop (capitalize)\n\n"
-        "Commands:\n"
-        "/balance - current balance\n"
-        "/report - monthly report\n"
-        "/asset - asset list\n"
-        "/export - export to Excel\n"
-        "/buy <asset> <qty> <price> - buy asset\n"
-        "/sell <asset> <qty> <price> - sell asset\n"
-        "/web - dashboard link",
+    bot.reply_to(message, "Welcome to Personal Finance Bot!\nType /help to see all commands.")
+
+@bot.message_handler(commands=["help"])
+def cmd_help(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    help_text = (
+        "📊 *FINANCE BOT COMMAND PANEL* 📊\n"
+        "─────────────────────────────\n"
+        "📝 *Logging Transactions:*\n"
+        "  `+500 salary March`\n"
+        "  `-200 lunch`\n"
+        "  `-10000 laptop` (can be capitalized)\n\n"
+        "💼 *Asset Management:*\n"
+        "  `/buy <asset> <qty> <price>` - Buy asset\n"
+        "  `/liquidate <id> <price>` - Sell asset\n"
+        "  `/asset` - View all assets\n\n"
+        "📈 *Reports & Status:*\n"
+        "  `/balance` - Current balance\n"
+        "  `/report` - Monthly report\n"
+        "  `/export` - Export to Excel\n"
+        "  `/web` - Dashboard link\n"
+        "─────────────────────────────"
     )
+    bot.reply_to(message, help_text, parse_mode="Markdown")
 
 @bot.message_handler(commands=["balance"])
 def cmd_balance(message: Message):
@@ -196,6 +207,14 @@ def cmd_buy(message: Message):
     # Capitalize it
     aid = add_asset(message.from_user.id, tid, asset_name, total_value, 1) # Depreciate in 1 month (or could be 0, but logic expects >0)
     
+    # Sync to Portfolio Excel
+    sync_asset_to_portfolio({
+        "date": datetime.now().isoformat()[:10],
+        "name": asset_name,
+        "value": total_value,
+        "note": f"Bought {qty} units at {price}"
+    }, is_buy=True)
+    
     bot.reply_to(message, f"✅ Bought {qty} of {asset_name} for total {total_value:,.0f} VND.\nAsset tracked!")
 
 @bot.message_handler(commands=["sell"])
@@ -235,35 +254,79 @@ def handle_message(message: Message):
     if sign == "-":
         amount = -amount
 
-    tid = add_transaction(uid, amount, guess_category(desc), desc, is_asset=0)
-
-    if sign == "-" and amount < -1000:
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton("Yes - capitalize", callback_data=f"cap_{tid}_{abs(amount)}"),
-            InlineKeyboardButton("No", callback_data=f"nocap_{tid}"),
-        )
-        bot.reply_to(
-            message,
-            f"Recorded: {amount:+,.0f} - {desc}\n\n"
-            f"Is this an asset to capitalize (depreciate over time)?",
-            reply_markup=markup,
-        )
-    else:
-        bal = get_balance()
-        bot.reply_to(
-            message,
-            f"Recorded: {amount:+,.0f} - {desc}\nBalance: {bal:,.0f}",
-        )
-
-    user_state[uid] = {"pending_capitalize": None}
+    user_state[uid] = {
+        "pending_tx": {
+            "amount": amount,
+            "category": guess_category(desc),
+            "description": desc,
+        }
+    }
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(
+        InlineKeyboardButton("VCB", callback_data="bank_VCB"),
+        InlineKeyboardButton("ACB", callback_data="bank_ACB"),
+        InlineKeyboardButton("HDBANK", callback_data="bank_HDBANK")
+    )
+    
+    bot.reply_to(
+        message,
+        f"Amount: {amount:+,.0f}\nDesc: {desc}\n\nPlease select the bank account:",
+        reply_markup=markup
+    )
 
 @bot.callback_query_handler(func=lambda c: True)
 def handle_callback(call):
     uid = call.from_user.id
     data = call.data
 
-    if data.startswith("cap_"):
+    if data.startswith("bank_"):
+        bank = data.split("_")[1]
+        state = user_state.get(uid, {}).get("pending_tx")
+        if not state:
+            bot.answer_callback_query(call.id, "Session expired.")
+            return
+            
+        amount = state["amount"]
+        desc = state["description"]
+        cat = state["category"]
+        
+        tid = add_transaction(uid, amount, cat, desc, is_asset=0, bank_account=bank)
+        
+        # Sync to Expense Excel
+        sync_expense_to_excel({
+            "date": datetime.now().isoformat()[:10],
+            "amount": amount,
+            "category": cat,
+            "description": desc,
+            "bank_account": bank
+        })
+        
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        
+        if amount < -1000:
+            markup = InlineKeyboardMarkup()
+            markup.add(
+                InlineKeyboardButton("Yes - capitalize", callback_data=f"cap_{tid}_{abs(amount)}"),
+                InlineKeyboardButton("No", callback_data=f"nocap_{tid}"),
+            )
+            bot.send_message(
+                uid,
+                f"Recorded: {amount:+,.0f} - {desc} ({bank})\n\n"
+                f"Is this an asset to capitalize (depreciate over time)?",
+                reply_markup=markup,
+            )
+        else:
+            bal = get_balance()
+            bot.send_message(
+                uid,
+                f"Recorded: {amount:+,.0f} - {desc} ({bank})\nBalance: {bal:,.0f}",
+            )
+            
+        user_state[uid] = {"pending_capitalize": None}
+        bot.answer_callback_query(call.id)
+
+    elif data.startswith("cap_"):
         parts = data.split("_")
         tid = int(parts[1])
         asset_value = float(parts[2])
@@ -322,6 +385,15 @@ def handle_capitalize_flow(message: Message):
             f"Monthly: {value / months:,.0f}\n\n"
             f"Use /asset to track it.",
         )
+        
+        # Sync to Portfolio Excel
+        sync_asset_to_portfolio({
+            "date": datetime.now().isoformat()[:10],
+            "name": name,
+            "value": value,
+            "note": "Capitalized asset"
+        }, is_buy=True)
+        
         user_state[uid] = {}
 
 def guess_category(desc):

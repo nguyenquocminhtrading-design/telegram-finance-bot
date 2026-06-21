@@ -5,86 +5,126 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Finance Dashboard</title>
     <link rel="stylesheet" href="/static/css/style.css">
-    <!-- Include Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
     <nav class="sidebar">
-        <h2><span>Finance</span></h2>
-        <a href="/dashboard" class="active"><span>Dashboard</span></a>
-        <a href="/transactions"><span>Transactions</span></a>
-        <a href="/assets"><span>Assets</span></a>
-        <a href="/reports"><span>Reports</span></a>
-        <a href="/settings"><span>Settings</span></a>
+        <div class="sidebar-logo">
+            <span>FinanceBot</span>
+        </div>
+        <a href="/dashboard" class="active">Dashboard</a>
+        <a href="/transactions">Transactions</a>
+        <a href="/assets">Saving Plans & Assets</a>
+        <a href="/reports">Reports</a>
+        <a href="/settings">Settings</a>
     </nav>
+    
     <div class="main-content">
-        <div class="header-bar">
+        <div class="top-header">
             <h1>Dashboard</h1>
-            <div class="header-right">
-                <a href="/api/export/excel" class="btn-export">Export to Excel</a>
-                <div class="balance-display {% if report.balance < 0 %}negative{% endif %}">
-                    {{ "{:,.0f}".format(report.balance) }} VND
-                </div>
+            <div class="header-actions">
+                <div class="search-bar">Search placeholder...</div>
+                <a href="/api/export/excel" style="color: var(--primary-blue); font-weight: 500; text-decoration: none;">Export Excel</a>
             </div>
         </div>
 
-        <div class="cards">
-            <div class="card">
-                <h3>Monthly Income</h3>
-                <div class="value positive">+{{ "{:,.0f}".format(report.monthly.income) }}</div>
-            </div>
-            <div class="card">
-                <h3>Monthly Expense</h3>
-                <div class="value negative">-{{ "{:,.0f}".format(report.monthly.expense) }}</div>
-            </div>
-            <div class="card">
-                <h3>Monthly Net</h3>
-                <div class="value {% if report.monthly.net >= 0 %}positive{% else %}negative{% endif %}">
-                    {{ "{:+,.0f}".format(report.monthly.net) }}
-                </div>
-            </div>
-            <div class="card">
-                <h3>Active Assets</h3>
-                <div class="value" style="color:#3b82f6;">{{ assets.active_count }}</div>
-            </div>
-        </div>
-
-        <div class="charts-row">
-            <div class="chart-card">
-                <h3>Spending by Category</h3>
-                <canvas id="categoryChart" height="250"></canvas>
-            </div>
-            <div class="chart-card">
-                <h3>Monthly Cash Flow</h3>
-                <canvas id="cashFlowChart" height="250"></canvas>
-            </div>
-        </div>
-
-        {% if assets.assets %}
-        <div class="chart-card" style="margin-top: 20px;">
-            <h3>Depreciating Assets</h3>
-            <table>
-                <tr><th>Name</th><th>Original</th><th>Current</th><th>Progress</th></tr>
-                {% for a in assets.assets %}
-                {% if a.is_active %}
-                <tr>
-                    <td>{{ a.name }}</td>
-                    <td>{{ "{:,.0f}".format(a.original_value) }}</td>
-                    <td>{{ "{:,.0f}".format(a.current_value) }}</td>
-                    <td>
-                        {% set pct = ((a.original_value - a.current_value) / a.original_value * 100) %}
-                        <div class="asset-progress">
-                            <div class="asset-progress-bar" style="width: {{ pct }}%;"></div>
+        <div class="dashboard-grid">
+            <!-- Left Main Column -->
+            <div class="main-column">
+                <div class="top-cards-row">
+                    <div class="card balance-card">
+                        <h3>Andrew Forbist</h3>
+                        <div class="amount">{{ "{:,.0f}".format(report.balance) }} </div>
+                        <div class="details">
+                            <span>VND</span>
                         </div>
-                        <small>{{ "%.0f"|format(pct) }}% Depreciated</small>
-                    </td>
-                </tr>
+                    </div>
+                    <div class="card stat-card">
+                        <h4>Total Income</h4>
+                        <div class="value text-green">+{{ "{:,.0f}".format(report.monthly.income) }}</div>
+                    </div>
+                    <div class="card stat-card">
+                        <h4>Total Expense</h4>
+                        <div class="value text-red">-{{ "{:,.0f}".format(report.monthly.expense) }}</div>
+                    </div>
+                    <div class="card stat-card">
+                        <h4>Total Savings</h4>
+                        <div class="value text-green">{{ assets.active_count }} Active</div>
+                    </div>
+                </div>
+
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <h3>Cashflow</h3>
+                        <select style="border:none; color:var(--text-muted); font-weight:500;"><option>This Year</option></select>
+                    </div>
+                    <canvas id="cashFlowChart" height="250"></canvas>
+                </div>
+
+                <div class="recent-transactions">
+                    <div class="chart-header">
+                        <h3>Recent Transactions</h3>
+                        <a href="/transactions" class="text-muted" style="text-decoration: none;">View All</a>
+                    </div>
+                    <table class="tx-table">
+                        <tr>
+                            <th>Transaction Name</th>
+                            <th>Date</th>
+                            <th>Amount</th>
+                            <th>Bank</th>
+                        </tr>
+                        {% for tx in recent_transactions %}
+                        <tr>
+                            <td>
+                                <div>{{ tx.description }}</div>
+                                <div class="text-muted" style="text-transform: capitalize;">{{ tx.category }}</div>
+                            </td>
+                            <td class="text-muted">{{ tx.transaction_date }}</td>
+                            <td class="{% if tx.amount > 0 %}text-green{% else %}text-red{% endif %}">
+                                {{ "{:+,.0f}".format(tx.amount) }}
+                            </td>
+                            <td>
+                                <span class="status-badge status-completed">{{ tx.bank_account if tx.bank_account else 'Cash' }}</span>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </table>
+                </div>
+            </div>
+
+            <!-- Right Sidebar Column -->
+            <div class="side-column">
+                <div class="donut-chart-card">
+                    <div class="chart-header">
+                        <h3>Statistic</h3>
+                        <span class="text-muted">This Month</span>
+                    </div>
+                    <canvas id="categoryChart" height="250"></canvas>
+                </div>
+                
+                {% if assets.assets %}
+                <div class="recent-transactions">
+                    <div class="chart-header">
+                        <h3>Active Plans</h3>
+                    </div>
+                    <table class="tx-table">
+                        {% for a in assets.assets %}
+                        {% if a.is_active %}
+                        <tr>
+                            <td>
+                                <div>{{ a.name }}</div>
+                                <div class="text-muted">{{ "{:,.0f}".format(a.current_value) }} / {{ "{:,.0f}".format(a.original_value) }}</div>
+                            </td>
+                        </tr>
+                        {% endif %}
+                        {% endfor %}
+                    </table>
+                </div>
                 {% endif %}
-                {% endfor %}
-            </table>
+            </div>
         </div>
-        {% endif %}
     </div>
+
     <script src="/static/js/chart.js"></script>
     <script>
         const report = {{ report | tojson }};

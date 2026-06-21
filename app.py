@@ -36,7 +36,8 @@ def index():
 def dashboard():
     report = get_full_report()
     assets = get_asset_summary()
-    return render_template("dashboard.html", report=report, assets=assets)
+    recent_transactions = get_transactions(0, limit=5, offset=0)
+    return render_template("dashboard.html", report=report, assets=assets, recent_transactions=recent_transactions)
 
 
 @app.route("/snapshot")

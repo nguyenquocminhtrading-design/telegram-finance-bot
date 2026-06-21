@@ -1,8 +1,8 @@
 function initDashboardCharts(report) {
     // Colors based on new theme
     const chartColors = [
-        '#3b82f6', '#10b981', '#f59e0b', '#ef4444', 
-        '#8b5cf6', '#ec4899', '#14b8a6', '#64748b'
+        'rgb(0, 25, 152)', '#3b82f6', '#8b5cf6', '#ec4899', 
+        '#f59e0b', '#10b981', '#14b8a6', '#64748b'
     ];
 
     // Category Pie Chart
@@ -28,9 +28,9 @@ function initDashboardCharts(report) {
                 maintainAspectRatio: false,
                 plugins: {
                     legend: {
-                        position: 'right',
+                        position: 'bottom',
                         labels: {
-                            font: { family: 'Inter', size: 12 },
+                            font: { family: 'Outfit', size: 12 },
                             usePointStyle: true,
                             padding: 20
                         }
@@ -50,7 +50,7 @@ function initDashboardCharts(report) {
                         }
                     }
                 },
-                cutout: '65%'
+                cutout: '70%'
             }
         });
     }
@@ -71,7 +71,7 @@ function initDashboardCharts(report) {
                     {
                         label: 'Income',
                         data: incomeData,
-                        backgroundColor: '#10b981',
+                        backgroundColor: 'rgb(0, 25, 152)',
                         borderRadius: 4,
                         barPercentage: 0.6,
                         categoryPercentage: 0.8
@@ -79,7 +79,7 @@ function initDashboardCharts(report) {
                     {
                         label: 'Expense',
                         data: expenseData,
-                        backgroundColor: '#ef4444',
+                        backgroundColor: '#93c5fd', /* light blue */
                         borderRadius: 4,
                         barPercentage: 0.6,
                         categoryPercentage: 0.8
@@ -96,7 +96,8 @@ function initDashboardCharts(report) {
                 plugins: {
                     legend: {
                         position: 'top',
-                        labels: { font: { family: 'Inter' }, usePointStyle: true }
+                        align: 'end',
+                        labels: { font: { family: 'Outfit', size: 12 }, usePointStyle: true, boxWidth: 8 }
                     },
                     tooltip: {
                         callbacks: {
@@ -116,12 +117,12 @@ function initDashboardCharts(report) {
                 scales: {
                     x: {
                         grid: { display: false },
-                        ticks: { font: { family: 'Inter' } }
+                        ticks: { font: { family: 'Outfit' } }
                     },
                     y: {
-                        grid: { borderDash: [5, 5], color: '#e5e7eb' },
+                        grid: { borderDash: [5, 5], color: '#f1f5f9' },
                         ticks: {
-                            font: { family: 'Inter' },
+                            font: { family: 'Outfit' },
                             callback: function(value) {
                                 if(value >= 1000000) return (value / 1000000) + 'M';
                                 if(value >= 1000) return (value / 1000) + 'K';

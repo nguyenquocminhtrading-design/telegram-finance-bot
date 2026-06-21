@@ -73,6 +73,14 @@ def liquidate_asset(aid, sell_price, user_id=0):
         is_asset=0,
     )
 
+    from excel_sync import sync_asset_to_portfolio
+    sync_asset_to_portfolio({
+        "date": datetime.now().isoformat()[:10],
+        "name": asset["name"],
+        "value": sell_price,
+        "note": f"Liquidated, remaining value: {remaining}"
+    }, is_buy=False)
+
     deactivate_asset(aid)
     return {
         "transaction_id": tid,

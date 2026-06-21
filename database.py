@@ -23,6 +23,7 @@ def init_db():
             description TEXT DEFAULT '',
             transaction_date TEXT NOT NULL DEFAULT (date('now')),
             is_asset INTEGER NOT NULL DEFAULT 0,
+            bank_account TEXT DEFAULT '',
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -53,17 +54,21 @@ def init_db():
             value TEXT NOT NULL
         );
     """)
+    try:
+        conn.execute("ALTER TABLE transactions ADD COLUMN bank_account TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 
 
-def add_transaction(user_id, amount, category, description, transaction_date=None, is_asset=0):
+def add_transaction(user_id, amount, category, description, transaction_date=None, is_asset=0, bank_account=''):
     conn = get_db()
     if transaction_date is None:
         transaction_date = date.today().isoformat()
     cur = conn.execute(
-        "INSERT INTO transactions (user_id, amount, category, description, transaction_date, is_asset) VALUES (?,?,?,?,?,?)",
-        (user_id, amount, category, description, transaction_date, is_asset),
+        "INSERT INTO transactions (user_id, amount, category, description, transaction_date, is_asset, bank_account) VALUES (?,?,?,?,?,?,?)",
+        (user_id, amount, category, description, transaction_date, is_asset, bank_account),
     )
     conn.commit()
     tid = cur.lastrowid
@@ -98,12 +103,19 @@ def get_transaction_by_id(tid):
     return dict(row) if row else None
 
 
-def update_transaction(tid, amount, category, description, transaction_date):
+def update_transaction(tid, amount, category, description, transaction_date, bank_account=None):
     conn = get_db()
-    conn.execute(
-        "UPDATE transactions SET amount=?, category=?, description=?, transaction_date=? WHERE id=?",
-        (amount, category, description, transaction_date, tid),
-    )
+    
+    if bank_account is not None:
+        conn.execute(
+            "UPDATE transactions SET amount=?, category=?, description=?, transaction_date=?, bank_account=? WHERE id=?",
+            (amount, category, description, transaction_date, bank_account, tid),
+        )
+    else:
+        conn.execute(
+            "UPDATE transactions SET amount=?, category=?, description=?, transaction_date=? WHERE id=?",
+            (amount, category, description, transaction_date, tid),
+        )
     conn.commit()
     conn.close()
 
