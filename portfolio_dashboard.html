@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Nguyen Quoc Minh Portfolio</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Manrope',sans-serif;background:linear-gradient(180deg,#eef1f2 0%,#dce4e7 100%);color:#101418;min-height:100vh}
+.shell{max-width:1380px;margin:0 auto;padding:24px}
+.app{background:rgba(255,255,255,.82);backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.65);box-shadow:0 24px 70px rgba(15,23,42,.10);border-radius:36px;padding:18px}
+.topbar{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:8px 8px 18px;border-bottom:1px solid #ebeef0}
+.brand{display:flex;align-items:center;gap:14px}
+.brand-badge{width:46px;height:46px;border-radius:16px;background:#0f172a;color:#fff;display:grid;place-items:center;font-size:18px;font-weight:800}
+.brand h1{font-size:28px;font-weight:800;letter-spacing:-.04em}
+.brand p{margin-top:4px;color:#697586;font-size:13px}
+.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.btn{border:none;border-radius:14px;padding:12px 16px;font:700 14px 'Manrope',sans-serif;cursor:pointer;transition:.18s ease}
+.btn.primary{background:#101418;color:#fff}
+.btn.secondary{background:#edf1f5;color:#1f2937}
+.file-pill{padding:11px 14px;border-radius:14px;background:#f7f9fb;color:#617081;font-size:13px}
+.tabs{display:flex;gap:10px;flex-wrap:wrap;padding:18px 8px}
+.tab-btn{border:none;background:#fff;color:#5a6778;border-radius:999px;padding:12px 18px;font:700 13px 'Manrope',sans-serif;cursor:pointer;border:1px solid #e8ecef;transition:.18s ease}
+.tab-btn.active,.tab-btn:hover{background:#111827;color:#fff;border-color:#111827}
+.section{display:none}
+.section.active{display:block}
+.hero{display:grid;grid-template-columns:1.4fr .9fr;gap:18px;margin-top:4px}
+.panel{background:#fff;border:1px solid #eceff1;border-radius:28px;padding:20px}
+.panel h2{font-size:22px;font-weight:800;letter-spacing:-.03em}
+.panel-sub{margin-top:6px;color:#6b7280;font-size:13px;line-height:1.5}
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:18px 0}
+.stat{background:#fff;border:1px solid #eceff1;border-radius:24px;padding:18px}
+.stat.dark{background:#1f6f6b;color:#fff;border-color:#1f6f6b}
+.stat .label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;opacity:.75}
+.stat .value{margin-top:10px;font-size:30px;font-weight:800;letter-spacing:-.04em}
+.stat .hint{margin-top:8px;font-size:12px;opacity:.76}
+.positive{color:#15803d;font-weight:700}
+.negative{color:#b91c1c;font-weight:700}
+.dark .positive,.dark .negative{color:#fff}
+.chart-lg{height:390px;margin-top:18px}
+.content-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:18px;margin-top:18px}
+.table-wrap{margin-top:18px;overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#7b8596;padding:12px 10px;text-align:left;border-bottom:1px solid #eceff1}
+td{padding:14px 10px;border-bottom:1px solid #f1f4f6}
+.scenario-bars{display:flex;flex-direction:column;gap:12px;margin-top:18px}
+.scenario-bar{display:grid;grid-template-columns:130px 1fr 130px;gap:14px;align-items:center;padding:14px 16px;border-radius:20px;background:#fbfcfd;border:1px solid #edf1f3}
+.scenario-bar .name{font-weight:800}
+.track{height:14px;border-radius:999px;background:#edf1f3;overflow:hidden;position:relative}
+.fill{height:100%;border-radius:999px}
+.muted{color:#6b7280}
+.alert{margin-top:14px;padding:12px 14px;border-radius:16px;font-size:13px;font-weight:700}
+.alert.warn{background:#fff1d8;color:#8a5a00}
+.alert.ok{background:#e7f7ee;color:#146c43}
+canvas{max-height:100%}
+@media(max-width:1040px){.hero,.content-grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:720px){.shell{padding:12px}.app{padding:14px;border-radius:24px}.topbar{align-items:flex-start;flex-direction:column}.stats{grid-template-columns:1fr}.scenario-bar{grid-template-columns:1fr}.chart-lg{height:320px}}
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="app">
+    <div class="topbar">
+      <div class="brand">
+        <div class="brand-badge">NQM</div>
+        <div>
+          <h1>Nguyen Quoc Minh</h1>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="uploadBtn" class="btn primary">Tai file Excel</button>
+        <button id="resetBtn" class="btn secondary">Dung du lieu mau</button>
+        <div id="fileName" class="file-pill">Chua co file. Dang dung du lieu mau.</div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="overview">Tong quan</button>
+      <button class="tab-btn" data-tab="projection">Projection 5Y</button>
+      <button class="tab-btn" data-tab="scenario">Best / Base / Worst</button>
+      <button class="tab-btn" data-tab="transactions">Transactions</button>
+    </div>
+
+    <section id="overview" class="section active">
+      <div class="stats" id="overviewStats"></div>
+      <div class="hero">
+        <div class="panel">
+          <h2>Portfolio Allocation</h2>
+          <div class="panel-sub">Ty trong danh muc doc tu gia tri hien tai cua tung quy.</div>
+          <div class="chart-lg"><canvas id="allocationChart"></canvas></div>
+        </div>
+        <div class="panel">
+          <h2>Current Performance</h2>
+          <div class="panel-sub">Lai lo hien tai theo tung quy va tong danh muc.</div>
+          <div class="chart-lg"><canvas id="valueChart"></canvas></div>
+          <div id="overviewAlerts"></div>
+        </div>
+      </div>
+      <div class="panel" style="margin-top:18px">
+        <h2>Investments</h2>
+        <div class="panel-sub">Bang rut gon, giu lai cac chi so quan trong nhat.</div>
+        <div class="table-wrap"><table id="overviewTable"></table></div>
+      </div>
+    </section>
+
+    <section id="projection" class="section">
+      <div class="stats" id="projectionStats"></div>
+      <div class="hero">
+        <div class="panel">
+          <h2>Total Value vs Contributed Capital</h2>
+          <div class="panel-sub">Chart lon de nhin ro tang truong va tong von da nap.</div>
+          <div class="chart-lg"><canvas id="projectionLine"></canvas></div>
+        </div>
+        <div class="panel">
+          <h2>Monthly Return</h2>
+          <div class="panel-sub">Return thang da tach dong tien nap them.</div>
+          <div class="chart-lg"><canvas id="projectionReturn"></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="scenario" class="section">
+      <div class="panel">
+        <h2>Scenario Ladder</h2>
+        <div class="panel-sub">Worst, base va best case duoc trinh bay thanh ngang de so sanh nhanh.</div>
+        <div class="scenario-bars" id="scenarioBars"></div>
+      </div>
+      <div class="content-grid">
+        <div class="panel">
+          <h2>Scenario Compare</h2>
+          <div class="panel-sub">Gia tri sau 5 nam theo 3 kich ban.</div>
+          <div class="chart-lg"><canvas id="scenarioChart"></canvas></div>
+        </div>
+        <div class="panel">
+          <h2>Rebalancing Snapshot</h2>
+          <div class="panel-sub">Doc tu muc tieu phan bo hien tai.</div>
+          <div class="table-wrap"><table id="rebalanceTable"></table></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="transactions" class="section">
+      <div class="panel">
+        <h2>Transactions</h2>
+        <div class="panel-sub">Lich su giao dich theo gia tri.</div>
+        <div class="table-wrap"><table id="transactionsTable"></table></div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script>
+const COLORS=['#1f6f6b','#61a8a2','#94b8c9','#d7dde2'];
+let charts={};
+
+const SAMPLE={
+  funds:['DCDS','DCDE','ETFVN30','CCQ'],
+  currentPrices:[27300,38500,19800,12900],
+  invested:[12562500,10552500,18090000,9648000],
+  currentValues:[13650000,11550000,19800000,10320000],
+  pnl:[1087500,997500,1710000,672000],
+  returns:[0.0866,0.0945,0.0945,0.0696],
+  weights:[0.2467,0.2088,0.3579,0.1865],
+  targets:[0.30,0.30,0.25,0.15],
+  monthlyContribution:4000000,
+  projection:[],
+  scenarios:[],
+  transactions:[
+    ['06/01/2025','Mua','DCDS',12500000,62500,0,-12562500,'Khoi tao'],
+    ['06/01/2025','Mua','DCDE',10500000,52500,0,-10552500,'Khoi tao'],
+    ['06/01/2025','Mua','ETFVN30',18000000,90000,0,-18090000,'Khoi tao'],
+    ['06/01/2025','Mua','CCQ',9600000,48000,0,-9648000,'Khoi tao']
+  ]
+};
+
+function createSample(){
+  const data=JSON.parse(JSON.stringify(SAMPLE));
+  data.projection=buildProjectionFallback(data);
+  data.scenarios=buildScenarioFallback(data);
+  return data;
+}
+
+let state=createSample();
+
+function money(v){return Number(v||0).toLocaleString('vi-VN')+' ₫'}
+function pct(v,d=2){return (Number(v||0)*100).toFixed(d)+'%'}
+function posClass(v){return Number(v)>=0?'positive':'negative'}
+function destroy(name){if(charts[name]){charts[name].destroy();delete charts[name];}}
+
+function buildProjectionFallback(data){
+  const rows=[], annual=[0.12,0.15,0.10,0.07];
+  let fundValues=[...data.currentValues];
+  let invested=data.currentValues.reduce((a,b)=>a+b,0);
+  for(let m=1;m<=60;m++){
+    fundValues=fundValues.map((v,i)=>v*(1+annual[i]/12)+data.monthlyContribution/4);
+    const total=fundValues.reduce((a,b)=>a+b,0);
+    invested+=data.monthlyContribution;
+    const prevTotal=rows.length?rows[rows.length-1].total:data.currentValues.reduce((a,b)=>a+b,0);
+    rows.push({month:m,year:Math.ceil(m/12),total,invested,pnl:total-invested,ret:(total-data.monthlyContribution-prevTotal)/prevTotal});
+  }
+  return rows;
+}
+
+function buildScenarioFallback(data){
+  const configs=[
+    {key:'Worst case',rates:[0.03,0.05,0.02,0.07],color:'#d7dde2'},
+    {key:'Base case',rates:[0.10,0.12,0.08,0.07],color:'#61a8a2'},
+    {key:'Best case',rates:[0.15,0.18,0.12,0.07],color:'#1f6f6b'}
+  ];
+  return configs.map(cfg=>{
+    let values=[...data.currentValues];
+    let invested=data.currentValues.reduce((a,b)=>a+b,0);
+    for(let m=1;m<=60;m++){
+      values=values.map((v,i)=>v*(1+cfg.rates[i]/12)+data.monthlyContribution/4);
+      invested+=data.monthlyContribution;
+    }
+    const total=values.reduce((a,b)=>a+b,0);
+    return {name:cfg.key,total,invested,pnl:total-invested,roi:total/invested-1,color:cfg.color};
+  });
+}
+
+function render(){
+  renderOverview();
+  renderProjection();
+  renderScenario();
+  renderTransactions();
+}
+
+function renderOverview(){
+  const totalValue=state.currentValues.reduce((a,b)=>a+b,0);
+  const totalInvested=state.invested.reduce((a,b)=>a+b,0);
+  const totalPnl=state.pnl.reduce((a,b)=>a+b,0);
+  const totalReturn=totalInvested?totalValue/totalInvested-1:0;
+
+  document.getElementById('overviewStats').innerHTML=[
+    {label:'Portfolio Value',value:money(totalValue),hint:'Gia tri hien tai',dark:true},
+    {label:'Net Invested',value:money(totalInvested),hint:'Von rong da vao danh muc'},
+    {label:'Net Profit / Loss',value:money(totalPnl),hint:'Chenh lech hien tai',cls:posClass(totalPnl)},
+    {label:'Portfolio Return',value:pct(totalReturn),hint:'Lai lo toan danh muc',cls:posClass(totalReturn)}
+  ].map(s=>`<div class="stat ${s.dark?'dark':''}"><div class="label">${s.label}</div><div class="value ${s.cls||''}">${s.value}</div><div class="hint">${s.hint}</div></div>`).join('');
+
+  const alerts=[];
+  if(!state.currentPrices.every(v=>v>0)) alerts.push(['warn','Chua co du gia hien tai de tinh ty trong danh muc.']);
+  if(totalReturn<-0.1) alerts.push(['warn','Danh muc dang lo hon 10%.']);
+  if(!alerts.length) alerts.push(['ok','Danh muc da san sang de theo doi tren web.']);
+  document.getElementById('overviewAlerts').innerHTML=alerts.map(a=>`<div class="alert ${a[0]}">${a[1]}</div>`).join('');
+
+  destroy('allocation');
+  charts.allocation=new Chart(document.getElementById('allocationChart'),{
+    type:'doughnut',
+    data:{labels:state.funds,datasets:[{data:state.currentValues,backgroundColor:COLORS,borderWidth:0}]},
+    options:{responsive:true,plugins:{legend:{position:'bottom'}},cutout:'70%'}
+  });
+
+  destroy('value');
+  charts.value=new Chart(document.getElementById('valueChart'),{
+    type:'bar',
+    data:{labels:state.funds,datasets:[{label:'P/L',data:state.pnl,backgroundColor:state.pnl.map(v=>v>=0?'#1f6f6b':'#b91c1c'),borderRadius:12,barThickness:40}]},
+    options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{ticks:{callback:v=>(v/1e6).toFixed(0)+'M'}}}}
+  });
+
+  document.getElementById('overviewTable').innerHTML=`<thead><tr><th>Quy</th><th>Von rong</th><th>Gia hien tai</th><th>Gia tri hien tai</th><th>Lai/Lo</th><th>Return</th><th>Ty trong</th></tr></thead><tbody>${
+    state.funds.map((f,i)=>`<tr><td><strong>${f}</strong></td><td>${money(state.invested[i])}</td><td>${money(state.currentPrices[i])}</td><td>${money(state.currentValues[i])}</td><td class="${posClass(state.pnl[i])}">${money(state.pnl[i])}</td><td class="${posClass(state.returns[i])}">${pct(state.returns[i])}</td><td>${pct(state.weights[i])}</td></tr>`).join('')
+  }<tr><td><strong>Tong</strong></td><td>${money(totalInvested)}</td><td class="muted">-</td><td>${money(totalValue)}</td><td class="${posClass(totalPnl)}">${money(totalPnl)}</td><td class="${posClass(totalReturn)}">${pct(totalReturn)}</td><td>100.00%</td></tr></tbody>`;
+}
+
+function renderProjection(){
+  const rows=state.projection||[];
+  const last=rows[rows.length-1];
+  document.getElementById('projectionStats').innerHTML=[
+    {label:'Monthly Contribution',value:money(state.monthlyContribution),hint:'Doc tu Projection 5Y',dark:true},
+    {label:'Ending Value',value:money(last.total),hint:'Tong gia tri sau 60 thang'},
+    {label:'Capital Contributed',value:money(last.invested),hint:'Von hien tai + nap them'},
+    {label:'Projection P/L',value:money(last.pnl),hint:'Da tach dong tien nap them',cls:posClass(last.pnl)}
+  ].map(s=>`<div class="stat ${s.dark?'dark':''}"><div class="label">${s.label}</div><div class="value ${s.cls||''}">${s.value}</div><div class="hint">${s.hint}</div></div>`).join('');
+
+  destroy('projectionLine');
+  charts.projectionLine=new Chart(document.getElementById('projectionLine'),{
+    type:'line',
+    data:{labels:rows.map(r=>'T'+r.month),datasets:[
+      {label:'Tong gia tri',data:rows.map(r=>r.total),borderColor:'#1f6f6b',backgroundColor:'rgba(31,111,107,.12)',fill:true,tension:.28,pointRadius:0,borderWidth:3},
+      {label:'Tong von da nap',data:rows.map(r=>r.invested),borderColor:'#0f172a',borderDash:[8,8],tension:.1,pointRadius:0,borderWidth:2}
+    ]},
+    options:{responsive:true,plugins:{legend:{position:'bottom'}},scales:{y:{ticks:{callback:v=>(v/1e6).toFixed(0)+'M'}}}}
+  });
+
+  destroy('projectionReturn');
+  charts.projectionReturn=new Chart(document.getElementById('projectionReturn'),{
+    type:'bar',
+    data:{labels:rows.map(r=>'T'+r.month),datasets:[{label:'Return %',data:rows.map(r=>+(r.ret*100).toFixed(2)),backgroundColor:rows.map(r=>r.ret>=0?'rgba(31,111,107,.85)':'rgba(185,28,28,.82)'),borderRadius:8}]},
+    options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{ticks:{callback:v=>v+'%'}}}}
+  });
+}
+
+function renderScenario(){
+  const rows=state.scenarios||[];
+  const max=Math.max(...rows.map(r=>r.total),1);
+  document.getElementById('scenarioBars').innerHTML=rows.map(r=>`
+    <div class="scenario-bar">
+      <div class="name">${r.name}</div>
+      <div class="track"><div class="fill" style="width:${(r.total/max)*100}%;background:${r.color}"></div></div>
+      <div style="text-align:right">
+        <div style="font-weight:800">${money(r.total)}</div>
+        <div class="${posClass(r.pnl)}" style="font-size:12px">ROI ${pct(r.roi)}</div>
+      </div>
+    </div>
+  `).join('');
+
+  destroy('scenario');
+  charts.scenario=new Chart(document.getElementById('scenarioChart'),{
+    type:'bar',
+    data:{labels:rows.map(r=>r.name),datasets:[{label:'Gia tri sau 5 nam',data:rows.map(r=>r.total),backgroundColor:rows.map(r=>r.color),borderRadius:12,barThickness:54}]},
+    options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{ticks:{callback:v=>(v/1e6).toFixed(0)+'M'}}}}
+  });
+
+  document.getElementById('rebalanceTable').innerHTML=`<thead><tr><th>Quy</th><th>Muc tieu</th><th>Hien tai</th><th>Chenh lech</th></tr></thead><tbody>${
+    state.funds.map((f,i)=>{
+      const diff=(state.weights[i]||0)-(state.targets[i]||0);
+      return `<tr><td><strong>${f}</strong></td><td>${pct(state.targets[i]||0)}</td><td>${pct(state.weights[i]||0)}</td><td class="${diff<=0?'positive':'negative'}">${pct(diff)}</td></tr>`;
+    }).join('')
+  }</tbody>`;
+}
+
+function renderTransactions(){
+  document.getElementById('transactionsTable').innerHTML=`<thead><tr><th>Ngay</th><th>Loai</th><th>Quy</th><th>Tong GT</th><th>Phi</th><th>Thue</th><th>Dong tien rong</th><th>Ghi chu</th></tr></thead><tbody>${
+    state.transactions.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td><strong>${r[2]}</strong></td><td>${money(r[3])}</td><td>${money(r[4])}</td><td>${money(r[5])}</td><td class="${posClass(r[6])}">${money(r[6])}</td><td>${r[7]||''}</td></tr>`).join('')
+  }</tbody>`;
+}
+
+function parseNumber(v){const n=Number(v);return Number.isFinite(n)?n:0}
+function parseDate(v){return typeof v==='number'?XLSX.SSF.format('dd/mm/yyyy',v):String(v||'')}
+
+function parseWorkbook(wb){
+  const ovSheet=wb.Sheets['Portfolio Overview'];
+  if(!ovSheet) throw new Error('Khong tim thay sheet Portfolio Overview');
+  const ov=XLSX.utils.sheet_to_json(ovSheet,{header:1,defval:''});
+  const headerRow=ov[3]||[];
+  const headerMap={};
+  headerRow.forEach((h,i)=>{ headerMap[String(h||'').trim().toLowerCase()]=i; });
+  const colFund=headerMap['quy'] ?? 0;
+  const colInvested=headerMap['von rong'] ?? 3;
+  const colUnits=headerMap['don vi rong'];
+  const colCurrentValue=headerMap['gia tri hien tai'] ?? 5;
+  const colPnl=headerMap['lai/lo vnd'] ?? 6;
+  const colReturn=headerMap['lai/lo %'] ?? 7;
+  const colWeight=headerMap['ty trong'] ?? 8;
+
+  const funds=[],invested=[],currentPrices=[],currentValues=[],pnl=[],returns=[],weights=[],units=[];
+  for(let i=4;i<=7;i++){
+    const row=ov[i]||[];
+    if(!row[colFund]) continue;
+    funds.push(String(row[colFund]));
+    invested.push(parseNumber(row[colInvested]));
+    units.push(colUnits!=null ? parseNumber(row[colUnits]) : 0);
+    currentValues.push(parseNumber(row[colCurrentValue]));
+    pnl.push(parseNumber(row[colPnl]));
+    returns.push(parseNumber(row[colReturn]));
+    weights.push(parseNumber(row[colWeight]));
+    currentPrices.push(units[units.length-1] ? currentValues[currentValues.length-1]/units[units.length-1] : 0);
+  }
+
+  const projSheet=wb.Sheets['Projection 5Y'];
+  const projection=[];
+  let monthlyContribution=4000000;
+  if(projSheet){
+    const pr=XLSX.utils.sheet_to_json(projSheet,{header:1,defval:''});
+    monthlyContribution=parseNumber((pr[9]||[])[1])||monthlyContribution;
+    for(let i=14;i<pr.length;i++){
+      const row=pr[i]||[];
+      if(!parseNumber(row[0])) continue;
+      projection.push({month:parseNumber(row[0]),year:parseNumber(row[1]),total:parseNumber(row[7]),invested:parseNumber(row[8]),pnl:parseNumber(row[9]),ret:parseNumber(row[10])});
+    }
+  }
+
+  const rebalSheet=wb.Sheets['Rebalancing'];
+  const targets=[0.3,0.3,0.25,0.15];
+  if(rebalSheet){
+    const rb=XLSX.utils.sheet_to_json(rebalSheet,{header:1,defval:''});
+    for(let i=3;i<=6;i++) targets[i-3]=parseNumber((rb[i]||[])[1])||targets[i-3];
+  }
+
+  const txnSheet=wb.Sheets['Transactions'];
+  const transactions=[];
+  if(txnSheet){
+    const tx=XLSX.utils.sheet_to_json(txnSheet,{header:1,defval:''});
+    for(let i=3;i<tx.length;i++){
+      const row=tx[i]||[];
+      const type=String(row[1]||'').trim();
+      if(!type || String(row[0]||'').toUpperCase()==='TONG KET') continue;
+      if(!['Mua','Bán','Ban'].includes(type)) continue;
+      transactions.push([parseDate(row[0]),type,row[2]||'',parseNumber(row[3]),parseNumber(row[4]),parseNumber(row[5]),parseNumber(row[6]),row[7]||'']);
+    }
+  }
+
+  const data={funds,invested,currentPrices,currentValues,pnl,returns,weights,targets,monthlyContribution,projection,transactions};
+  data.scenarios=buildScenarioFallback(data);
+  return data;
+}
+
+document.querySelectorAll('.tab-btn').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('.tab-btn').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.section').forEach(x=>x.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(btn.dataset.tab).classList.add('active');
+  });
+});
+
+document.getElementById('uploadBtn').onclick=()=>{
+  const input=document.createElement('input');
+  input.type='file';
+  input.accept='.xlsx,.xlsm,.xls';
+  input.onchange=e=>{
+    const file=e.target.files[0];
+    if(!file) return;
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      try{
+        const wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array'});
+        state=parseWorkbook(wb);
+        render();
+        document.getElementById('fileName').textContent='Da tai: '+file.name;
+      }catch(err){
+        document.getElementById('fileName').textContent='Doc file that bai: '+(err.message||'loi');
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+  input.click();
+};
+
+document.getElementById('resetBtn').onclick=()=>{
+  state=createSample();
+  render();
+  document.getElementById('fileName').textContent='Dang dung du lieu mau.';
+};
+
+render();
+</script>
+</body>
+</html>
