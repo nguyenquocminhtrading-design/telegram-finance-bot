@@ -12,42 +12,54 @@ SCOPES = [
 
 def get_gspread_client():
     if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
-        print(f"Warning: Google credentials file '{GOOGLE_CREDENTIALS_FILE}' not found.")
-        return None
+        msg = f"Google credentials file '{GOOGLE_CREDENTIALS_FILE}' not found."
+        print(f"[GSheets] Warning: {msg}")
+        return None, msg
     try:
         credentials = Credentials.from_service_account_file(
             GOOGLE_CREDENTIALS_FILE, scopes=SCOPES
         )
         client = gspread.authorize(credentials)
-        return client
+        return client, None
     except Exception as e:
-        print(f"Error authenticating with Google Sheets: {e}")
-        return None
+        msg = f"Lỗi xác thực Google Sheets: {e}"
+        print(f"[GSheets] {msg}")
+        return None, msg
+
 
 def sync_expense_to_gsheet(transaction_data):
     """
-    transaction_data: dict with keys:
-    date, amount, category, description, bank_account
+    Ghi một giao dịch chi tiêu vào Google Sheet.
+
+    transaction_data: dict với các key:
+        date, amount, category, description, bank_account
+
+    Trả về:
+        (True, None)              — thành công
+        (False, error_message)    — thất bại, kèm lý do
     """
-    client = get_gspread_client()
+    client, auth_err = get_gspread_client()
     if not client:
-        return
+        return False, auth_err
 
     try:
-        # Try to open the sheet by name
+        # Mở sheet theo tên
         try:
             sheet = client.open(EXPENSE_SHEET_NAME)
         except gspread.exceptions.SpreadsheetNotFound:
-            print(f"Spreadsheet '{EXPENSE_SHEET_NAME}' not found. Please create it and share with the service account.")
-            return
+            msg = (
+                f"Không tìm thấy Google Sheet tên '{EXPENSE_SHEET_NAME}'. "
+                f"Hãy tạo sheet này và share quyền Editor cho service account."
+            )
+            print(f"[GSheets] {msg}")
+            return False, msg
 
-        # Select the 'Expenses' worksheet, create + add headers if missing
+        # Chọn worksheet "Expenses", tạo mới nếu chưa có
         try:
             worksheet = sheet.worksheet("Expenses")
         except gspread.exceptions.WorksheetNotFound:
             worksheet = sheet.sheet1
             worksheet.update_title("Expenses")
-            # Add header if new
             worksheet.append_row(
                 ["Date", "Amount", "Category", "Description", "Bank Account"],
                 value_input_option="USER_ENTERED",
@@ -61,35 +73,45 @@ def sync_expense_to_gsheet(transaction_data):
             transaction_data.get("description", ""),
             transaction_data.get("bank_account", "")
         ]
-        # Use USER_ENTERED so Google Sheets parses dates/numbers properly
-        # Use table_range="A1" so the API detects the actual last data row
-        # instead of appending to the very bottom of the sheet
         worksheet.append_row(
             row_data,
             value_input_option="USER_ENTERED",
             table_range="A1"
         )
         print(f"[GSheets] Expense synced: {row_data}")
+        return True, None
 
     except Exception as e:
-        print(f"Error syncing to expense Google Sheet: {e}")
+        msg = f"Lỗi ghi vào Google Sheet Expenses: {e}"
+        print(f"[GSheets] {msg}")
+        return False, msg
 
 
 def sync_asset_to_gsheet(asset_data, is_buy=True):
     """
-    asset_data: dict with keys:
-    date, name, value, note
+    Ghi một giao dịch tài sản vào Google Sheet portfolio.
+
+    asset_data: dict với các key:
+        date, name, value, note
+
+    Trả về:
+        (True, None)              — thành công
+        (False, error_message)    — thất bại, kèm lý do
     """
-    client = get_gspread_client()
+    client, auth_err = get_gspread_client()
     if not client:
-        return
+        return False, auth_err
 
     try:
         try:
             sheet = client.open(PORTFOLIO_SHEET_NAME)
         except gspread.exceptions.SpreadsheetNotFound:
-            print(f"Spreadsheet '{PORTFOLIO_SHEET_NAME}' not found. Please create it and share with the service account.")
-            return
+            msg = (
+                f"Không tìm thấy Google Sheet tên '{PORTFOLIO_SHEET_NAME}'. "
+                f"Hãy tạo sheet này và share quyền Editor cho service account."
+            )
+            print(f"[GSheets] {msg}")
+            return False, msg
 
         try:
             worksheet = sheet.worksheet("Transaction")
@@ -115,13 +137,15 @@ def sync_asset_to_gsheet(asset_data, is_buy=True):
             net_flow,   # Dòng tiền ròng
             asset_data.get("note", "")
         ]
-
         worksheet.append_row(
             row_data,
             value_input_option="USER_ENTERED",
             table_range="A1"
         )
         print(f"[GSheets] Asset synced: {row_data}")
+        return True, None
 
     except Exception as e:
-        print(f"Error syncing to portfolio Google Sheet: {e}")
+        msg = f"Lỗi ghi vào Google Sheet Portfolio: {e}"
+        print(f"[GSheets] {msg}")
+        return False, msg

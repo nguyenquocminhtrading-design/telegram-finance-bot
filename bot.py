@@ -257,12 +257,19 @@ def cmd_buy(message: Message):
     aid = add_asset(message.from_user.id, tid, asset_name, total_value, 1) # Depreciate in 1 month (or could be 0, but logic expects >0)
     
     # Sync to Portfolio Google Sheet
-    sync_asset_to_gsheet({
+    gs_ok, gs_err = sync_asset_to_gsheet({
         "date": datetime.now().isoformat()[:10],
         "name": asset_name,
         "value": total_value,
         "note": f"Bought {qty} units at {price}"
     }, is_buy=True)
+    if not gs_ok:
+        bot.send_message(
+            message.chat.id,
+            f"⚠️ *Cảnh báo:* Không sync tài sản vào Google Sheet!\n"
+            f"Lỗi: `{gs_err}`",
+            parse_mode="Markdown"
+        )
     
     bot.reply_to(message, f"✅ Bought {qty} of {asset_name} for total {total_value:,.0f} VND.\nAsset tracked!")
 
@@ -343,13 +350,22 @@ def handle_callback(call):
         tid = add_transaction(uid, amount, cat, desc, is_asset=0, bank_account=bank)
         
         # Sync to Expense Google Sheet
-        sync_expense_to_gsheet({
+        gs_ok, gs_err = sync_expense_to_gsheet({
             "date": datetime.now().isoformat()[:10],
             "amount": amount,
             "category": cat,
             "description": desc,
             "bank_account": bank
         })
+        if not gs_ok:
+            bot.send_message(
+                uid,
+                f"⚠️ *Cảnh báo:* Ghi vào Google Sheet thất bại!\n"
+                f"Dữ liệu đã lưu vào database local.\n"
+                f"Lỗi: `{gs_err}`",
+                parse_mode="Markdown"
+            )
+
         # Sync to local Excel file
         sync_expense_to_excel({
             "date": datetime.now().isoformat()[:10],
@@ -444,13 +460,21 @@ def handle_capitalize_flow(message: Message):
         )
         
         # Sync to Portfolio Google Sheet
-        sync_asset_to_gsheet({
+        gs_ok, gs_err = sync_asset_to_gsheet({
             "date": datetime.now().isoformat()[:10],
             "name": name,
             "value": value,
             "note": "Capitalized asset"
         }, is_buy=True)
-        
+        if not gs_ok:
+            bot.send_message(
+                uid,
+                f"⚠️ *Cảnh báo:* Không sync tài sản vào Google Sheet!\n"
+                f"Dữ liệu đã lưu vào database local.\n"
+                f"Lỗi: `{gs_err}`",
+                parse_mode="Markdown"
+            )
+
         user_state[uid] = {}
 
 def guess_category(desc):

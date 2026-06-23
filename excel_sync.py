@@ -2,8 +2,10 @@ import os
 import openpyxl
 from datetime import date
 
-EXPENSE_FILE = "My expenses.xlsx"
-PORTFOLIO_FILE = "My portfolio.xlsm"
+# Đường dẫn tuyệt đối dựa trên vị trí file này — tránh ghi nhầm thư mục
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+EXPENSE_FILE = os.path.join(_BASE_DIR, "My expenses.xlsx")
+PORTFOLIO_FILE = os.path.join(_BASE_DIR, "My portfolio.xlsm")
 
 def _next_empty_row(ws):
     """Find the first empty row by scanning column A from the top."""
