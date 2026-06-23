@@ -41,15 +41,18 @@ def sync_expense_to_gsheet(transaction_data):
             print(f"Spreadsheet '{EXPENSE_SHEET_NAME}' not found. Please create it and share with the service account.")
             return
 
-        # Select the first worksheet or a specific one named 'Expenses'
+        # Select the 'Expenses' worksheet, create + add headers if missing
         try:
             worksheet = sheet.worksheet("Expenses")
         except gspread.exceptions.WorksheetNotFound:
             worksheet = sheet.sheet1
             worksheet.update_title("Expenses")
             # Add header if new
-            if len(worksheet.get_all_values()) == 0:
-                worksheet.append_row(["Date", "Amount", "Category", "Description", "Bank Account"])
+            worksheet.append_row(
+                ["Date", "Amount", "Category", "Description", "Bank Account"],
+                value_input_option="USER_ENTERED",
+                table_range="A1"
+            )
 
         row_data = [
             transaction_data.get("date", date.today().isoformat()),
@@ -58,7 +61,15 @@ def sync_expense_to_gsheet(transaction_data):
             transaction_data.get("description", ""),
             transaction_data.get("bank_account", "")
         ]
-        worksheet.append_row(row_data)
+        # Use USER_ENTERED so Google Sheets parses dates/numbers properly
+        # Use table_range="A1" so the API detects the actual last data row
+        # instead of appending to the very bottom of the sheet
+        worksheet.append_row(
+            row_data,
+            value_input_option="USER_ENTERED",
+            table_range="A1"
+        )
+        print(f"[GSheets] Expense synced: {row_data}")
 
     except Exception as e:
         print(f"Error syncing to expense Google Sheet: {e}")
@@ -85,8 +96,11 @@ def sync_asset_to_gsheet(asset_data, is_buy=True):
         except gspread.exceptions.WorksheetNotFound:
             worksheet = sheet.sheet1
             worksheet.update_title("Transaction")
-            if len(worksheet.get_all_values()) == 0:
-                worksheet.append_row(["Ngày", "Loại GD", "Tài sản", "Giá trị", "Phí GD", "Thuế bán", "Dòng tiền ròng", "Ghi chú"])
+            worksheet.append_row(
+                ["Ngày", "Loại GD", "Tài sản", "Giá trị", "Phí GD", "Thuế bán", "Dòng tiền ròng", "Ghi chú"],
+                value_input_option="USER_ENTERED",
+                table_range="A1"
+            )
 
         trans_type = "Mua" if is_buy else "Bán"
         net_flow = -asset_data.get("value", 0) if is_buy else asset_data.get("value", 0)
@@ -96,13 +110,18 @@ def sync_asset_to_gsheet(asset_data, is_buy=True):
             trans_type,
             asset_data.get("name", ""),
             asset_data.get("value", 0),
-            0, # Phí GD
-            0, # Thuế bán
-            net_flow, # Dòng tiền ròng
+            0,          # Phí GD
+            0,          # Thuế bán
+            net_flow,   # Dòng tiền ròng
             asset_data.get("note", "")
         ]
-        
-        worksheet.append_row(row_data)
+
+        worksheet.append_row(
+            row_data,
+            value_input_option="USER_ENTERED",
+            table_range="A1"
+        )
+        print(f"[GSheets] Asset synced: {row_data}")
 
     except Exception as e:
         print(f"Error syncing to portfolio Google Sheet: {e}")

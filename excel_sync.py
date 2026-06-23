@@ -5,6 +5,13 @@ from datetime import date
 EXPENSE_FILE = "My expenses.xlsx"
 PORTFOLIO_FILE = "My portfolio.xlsm"
 
+def _next_empty_row(ws):
+    """Find the first empty row by scanning column A from the top."""
+    for row in range(1, ws.max_row + 2):
+        if ws.cell(row=row, column=1).value is None:
+            return row
+    return ws.max_row + 1
+
 def sync_expense_to_excel(transaction_data):
     """
     transaction_data: dict with keys:
@@ -19,15 +26,18 @@ def sync_expense_to_excel(transaction_data):
         else:
             wb = openpyxl.load_workbook(EXPENSE_FILE)
             ws = wb.active
-            
-        ws.append([
+
+        next_row = _next_empty_row(ws)
+        row_data = [
             transaction_data.get("date", date.today().isoformat()),
             transaction_data.get("amount", 0),
             transaction_data.get("category", "other"),
             transaction_data.get("description", ""),
             transaction_data.get("bank_account", "")
-        ])
-        
+        ]
+        for col_idx, value in enumerate(row_data, start=1):
+            ws.cell(row=next_row, column=col_idx, value=value)
+
         wb.save(EXPENSE_FILE)
     except Exception as e:
         print(f"Error syncing to expense excel: {e}")
@@ -52,11 +62,9 @@ def sync_asset_to_portfolio(asset_data, is_buy=True):
             
         trans_type = "Mua" if is_buy else "Bán"
         net_flow = -asset_data.get("value", 0) if is_buy else asset_data.get("value", 0)
-        
-        # Find the next empty row below the data block (which might end around row 11)
-        next_row = ws.max_row + 1
-        
-        ws.append([
+
+        next_row = _next_empty_row(ws)
+        row_data = [
             asset_data.get("date", date.today().isoformat()),
             trans_type,
             asset_data.get("name", ""),
@@ -65,7 +73,9 @@ def sync_asset_to_portfolio(asset_data, is_buy=True):
             0, # Thuế bán
             net_flow, # Dòng tiền ròng
             asset_data.get("note", "")
-        ])
+        ]
+        for col_idx, value in enumerate(row_data, start=1):
+            ws.cell(row=next_row, column=col_idx, value=value)
         
         wb.save(PORTFOLIO_FILE)
     except Exception as e:

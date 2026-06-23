@@ -11,6 +11,7 @@ from database import add_asset
 from asset_manager import get_asset_summary, liquidate_asset
 from finance_logic import get_balance, get_monthly_summary, get_category_breakdown
 from gsheets_sync import sync_expense_to_gsheet, sync_asset_to_gsheet
+from excel_sync import sync_expense_to_excel
 from simulation import run_monte_carlo, generate_projection_chart
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
@@ -343,6 +344,14 @@ def handle_callback(call):
         
         # Sync to Expense Google Sheet
         sync_expense_to_gsheet({
+            "date": datetime.now().isoformat()[:10],
+            "amount": amount,
+            "category": cat,
+            "description": desc,
+            "bank_account": bank
+        })
+        # Sync to local Excel file
+        sync_expense_to_excel({
             "date": datetime.now().isoformat()[:10],
             "amount": amount,
             "category": cat,
