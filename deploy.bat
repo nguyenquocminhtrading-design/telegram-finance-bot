@@ -24,6 +24,7 @@ goto finish
 :deploy
 echo [1/3] Adding files to Git...
 git add .
+git reset .env 2>nul
 
 set /p commitMsg="Enter commit message (or press Enter for default 'Auto deploy update'): "
 if "%commitMsg%"=="" set commitMsg=Auto deploy update
