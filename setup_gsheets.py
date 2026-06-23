@@ -68,12 +68,16 @@ def setup():
             worksheet.update_title("Expenses")
             print("Renamed first tab to 'Expenses'.")
 
-        if len(worksheet.get_all_values()) == 0:
-            headers = ["Date", "Amount", "Category", "Description", "Bank Account"]
+        all_values = worksheet.get_all_values()
+        headers = ["Date", "Amount", "Category", "Description", "Bank Account"]
+        if len(all_values) == 0:
             worksheet.append_row(headers, value_input_option="USER_ENTERED", table_range="A1")
             print("Added headers for Expense.")
+        elif len(all_values[0]) == 0 or all_values[0][0] != "Date":
+            worksheet.insert_row(headers, index=1, value_input_option="USER_ENTERED")
+            print("Inserted missing headers at row 1 for Expense.")
         else:
-            print("Expense sheet already has data, skipping headers.")
+            print("Expense sheet already has correct headers.")
 
         # Apply formatting regardless (idempotent)
         apply_header_formatting(worksheet, num_cols=5)
@@ -96,12 +100,16 @@ def setup():
             worksheet.update_title("Transaction")
             print("Renamed first tab to 'Transaction'.")
 
-        if len(worksheet.get_all_values()) == 0:
-            headers = ["Ngày", "Loại GD", "Tài sản", "Giá trị", "Phí GD", "Thuế bán", "Dòng tiền ròng", "Ghi chú"]
+        all_values = worksheet.get_all_values()
+        headers = ["Ngày", "Loại GD", "Tài sản", "Giá trị", "Phí GD", "Thuế bán", "Dòng tiền ròng", "Ghi chú"]
+        if len(all_values) == 0:
             worksheet.append_row(headers, value_input_option="USER_ENTERED", table_range="A1")
             print("Added headers for Portfolio.")
+        elif len(all_values[0]) == 0 or all_values[0][0] != "Ngày":
+            worksheet.insert_row(headers, index=1, value_input_option="USER_ENTERED")
+            print("Inserted missing headers at row 1 for Portfolio.")
         else:
-            print("Portfolio sheet already has data, skipping headers.")
+            print("Portfolio sheet already has correct headers.")
 
         apply_header_formatting(worksheet, num_cols=8)
         apply_currency_formatting(worksheet, amount_col_letter="D")  # "Giá trị"

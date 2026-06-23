@@ -322,7 +322,8 @@ def handle_message(message: Message):
     markup.add(
         InlineKeyboardButton("VCB", callback_data="bank_VCB"),
         InlineKeyboardButton("ACB", callback_data="bank_ACB"),
-        InlineKeyboardButton("HDBANK", callback_data="bank_HDBANK")
+        InlineKeyboardButton("HDBANK", callback_data="bank_HDBANK"),
+        InlineKeyboardButton("CASH", callback_data="bank_CASH")
     )
     
     bot.reply_to(
