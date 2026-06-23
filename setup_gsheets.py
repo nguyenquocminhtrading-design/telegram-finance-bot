@@ -43,6 +43,54 @@ def apply_currency_formatting(worksheet, amount_col_letter, num_data_rows=1000):
     except Exception as e:
         print(f"  ⚠️ Could not apply currency formatting: {e}")
 
+def setup_summary_sheet(client):
+    print("\n--- Setup Summary Sheet ---")
+    try:
+        sheet = client.open(EXPENSE_SHEET_NAME)
+        try:
+            ws_summary = sheet.worksheet("Summary")
+            print("Tab 'Summary' already exists.")
+        except gspread.exceptions.WorksheetNotFound:
+            ws_summary = sheet.add_worksheet(title="Summary", rows="100", cols="20")
+            print("Created tab 'Summary'.")
+
+        updates = [
+            {"range": "A1:B1", "values": [["Bank Account", "Balance"]]},
+            {"range": "A2:A5", "values": [["VCB"], ["ACB"], ["HDBANK"], ["CASH"]]},
+            {"range": "B2:B5", "values": [
+                ['=SUMIF(Expenses!E:E, A2, Expenses!B:B)'],
+                ['=SUMIF(Expenses!E:E, A3, Expenses!B:B)'],
+                ['=SUMIF(Expenses!E:E, A4, Expenses!B:B)'],
+                ['=SUMIF(Expenses!E:E, A5, Expenses!B:B)']
+            ]},
+            {"range": "A6:B6", "values": [["TOTAL BALANCE", "=SUM(B2:B5)"]]},
+            {"range": "D1:E1", "values": [["Category", "Total Expense (All time)"]]},
+            {"range": "D2:D7", "values": [["food"], ["transport"], ["bill"], ["shopping"], ["health"], ["entertainment"]]},
+            {"range": "E2:E7", "values": [
+                ['=SUMIFS(Expenses!B:B, Expenses!C:C, D2, Expenses!B:B, "<0")'],
+                ['=SUMIFS(Expenses!B:B, Expenses!C:C, D3, Expenses!B:B, "<0")'],
+                ['=SUMIFS(Expenses!B:B, Expenses!C:C, D4, Expenses!B:B, "<0")'],
+                ['=SUMIFS(Expenses!B:B, Expenses!C:C, D5, Expenses!B:B, "<0")'],
+                ['=SUMIFS(Expenses!B:B, Expenses!C:C, D6, Expenses!B:B, "<0")'],
+                ['=SUMIFS(Expenses!B:B, Expenses!C:C, D7, Expenses!B:B, "<0")']
+            ]}
+        ]
+        ws_summary.batch_update(updates, value_input_option="USER_ENTERED")
+
+        try:
+            format_cell_range(ws_summary, "A1:B1", HEADER_FORMAT)
+            format_cell_range(ws_summary, "A6:B6", HEADER_FORMAT)
+            format_cell_range(ws_summary, "D1:E1", HEADER_FORMAT)
+            
+            format_cell_range(ws_summary, "B2:B6", CURRENCY_FORMAT)
+            format_cell_range(ws_summary, "E2:E7", CURRENCY_FORMAT)
+            print("  ✅ Summary formatting applied.")
+        except Exception as e:
+            print(f"  ⚠️ Could not apply summary formatting: {e}")
+
+    except Exception as e:
+        print(f"ERROR setting up Summary sheet: {e}")
+
 def setup():
     print("Connecting to Google Cloud...")
     if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
@@ -117,6 +165,9 @@ def setup():
 
     except gspread.exceptions.SpreadsheetNotFound:
         print(f"ERROR: Cannot find '{PORTFOLIO_SHEET_NAME}'. Please create it and share with the Service Account.")
+
+    # ─── Summary Sheet ────────────────────────────────────────────────────────
+    setup_summary_sheet(client)
 
 if __name__ == "__main__":
     setup()

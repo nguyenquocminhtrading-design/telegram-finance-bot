@@ -30,7 +30,7 @@ def get_monthly_summary(user_id=0, year=None, month=None):
                SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) as income,
                SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as expense
            FROM transactions
-           WHERE user_id = ? AND transaction_date >= ? AND transaction_date < ? AND is_asset = 0""",
+           WHERE user_id = ? AND transaction_date >= ? AND transaction_date < ? AND is_asset = 0 AND category != 'transfer'""",
         (user_id, start, end),
     ).fetchone()
     conn.close()
@@ -56,7 +56,7 @@ def get_category_breakdown(user_id=0, year=None, month=None):
     rows = conn.execute(
         """SELECT category, SUM(ABS(amount)) as total
            FROM transactions
-           WHERE user_id = ? AND amount < 0 AND transaction_date >= ? AND transaction_date < ? AND is_asset = 0
+           WHERE user_id = ? AND amount < 0 AND transaction_date >= ? AND transaction_date < ? AND is_asset = 0 AND category != 'transfer'
            GROUP BY category ORDER BY total DESC""",
         (user_id, start, end),
     ).fetchall()

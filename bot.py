@@ -13,6 +13,7 @@ from finance_logic import get_balance, get_monthly_summary, get_category_breakdo
 from gsheets_sync import sync_expense_to_gsheet, sync_asset_to_gsheet
 from excel_sync import sync_expense_to_excel
 from simulation import run_monte_carlo, generate_projection_chart
+from llm_parser import parse_transaction
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 
@@ -287,33 +288,124 @@ def handle_message(message: Message):
     uid = message.from_user.id
     text = message.text.strip()
 
-    match = re.match(r"^([+-])\s*([\d.,kKtTrR]+)\s*(.*)", text)
-    if not match:
-        bot.reply_to(
-            message,
-            "Format: +<amount> <description> or -<amount> <description>\n"
-            "Use k for thousand, tr for million.\n"
-            "Example: +500 salary, -200 lunch, -10tr laptop",
-        )
+    # Thử gọi LLM
+    parsed = parse_transaction(text)
+    
+    amount = None
+    desc = None
+    cat = None
+    bank = None
+    is_transfer = False
+    from_bank = None
+    to_bank = None
+
+    if parsed and "amount" in parsed and parsed["amount"] is not None:
+        try:
+            amount = float(parsed["amount"])
+            if parsed.get("action") == "expense":
+                amount = -abs(amount)
+            elif parsed.get("action") == "income":
+                amount = abs(amount)
+            elif parsed.get("action") == "transfer":
+                is_transfer = True
+                from_bank = parsed.get("from_bank")
+                to_bank = parsed.get("to_bank")
+                
+            desc = parsed.get("description", text)
+            cat = parsed.get("category", guess_category(desc))
+            bank = parsed.get("bank")
+        except ValueError:
+            parsed = None # Bị lỗi cast số thì rớt xuống fallback
+            
+    if not amount:
+        # Fallback to Regex
+        match = re.match(r"^([+-])\s*([\d.,kKtTrR]+)\s*(.*)", text)
+        if not match:
+            bot.reply_to(
+                message,
+                "Lỗi phân tích cú pháp hoặc Gemini API không phản hồi.\n"
+                "Sử dụng Format chuẩn: +<amount> <description> hoặc -<amount> <description>\n"
+                "Ví dụ: +500 lương, -200 ăn trưa, -10tr mua laptop",
+            )
+            return
+
+        sign = match.group(1)
+        raw_amount = match.group(2)
+        desc = match.group(3).strip()
+
+        try:
+            amount = parse_amount(raw_amount)
+        except ValueError:
+            bot.reply_to(message, "Sai định dạng số tiền.")
+            return
+
+        if sign == "-":
+            amount = -amount
+            
+        cat = guess_category(desc)
+        if cat == "transfer":
+            is_transfer = True
+
+    # Process Transfer
+    if is_transfer:
+        if not from_bank or not to_bank:
+            bot.reply_to(message, f"Giao dịch: Chuyển tiền\nSố tiền: {abs(amount):,.0f}\nLỗi: AI không nhận diện được ngân hàng gửi và nhận. Hãy thử nói rõ hơn, vd: 'chuyển 50k từ VCB sang CASH'")
+            return
+            
+        # Execute Transfer
+        tid_from = add_transaction(uid, -abs(amount), "transfer", desc, is_asset=0, bank_account=from_bank)
+        tid_to = add_transaction(uid, abs(amount), "transfer", desc, is_asset=0, bank_account=to_bank)
+        
+        # Sync BOTH to Google Sheets
+        sync_expense_to_gsheet({
+            "date": datetime.now().isoformat()[:10],
+            "amount": -abs(amount),
+            "category": "transfer",
+            "description": f"Chuyển tiền sang {to_bank}: {desc}",
+            "bank_account": from_bank
+        })
+        sync_expense_to_gsheet({
+            "date": datetime.now().isoformat()[:10],
+            "amount": abs(amount),
+            "category": "transfer",
+            "description": f"Nhận tiền từ {from_bank}: {desc}",
+            "bank_account": to_bank
+        })
+        
+        bot.reply_to(message, f"✅ Đã chuyển {abs(amount):,.0f} VND từ {from_bank} sang {to_bank}.")
         return
 
-    sign = match.group(1)
-    raw_amount = match.group(2)
-    desc = match.group(3).strip()
-
-    try:
-        amount = parse_amount(raw_amount)
-    except ValueError:
-        bot.reply_to(message, "Invalid amount format.")
+    # Normal Expense / Income
+    if bank:
+        # Bank is determined, record immediately
+        tid = add_transaction(uid, amount, cat, desc, is_asset=0, bank_account=bank)
+        
+        # Sync
+        gs_ok, gs_err = sync_expense_to_gsheet({
+            "date": datetime.now().isoformat()[:10],
+            "amount": amount,
+            "category": cat,
+            "description": desc,
+            "bank_account": bank
+        })
+        if not gs_ok:
+            bot.send_message(uid, f" *Cảnh báo:* Ghi vào Google Sheet thất bại!\nLỗi: `{gs_err}`", parse_mode="Markdown")
+            
+        sync_expense_to_excel({
+            "date": datetime.now().isoformat()[:10],
+            "amount": amount,
+            "category": cat,
+            "description": desc,
+            "bank_account": bank
+        })
+        
+        bot.reply_to(message, f"✅ Đã lưu: {amount:+,.0f} - {desc} ({bank})\nSố dư: {get_balance():,.0f}")
         return
-
-    if sign == "-":
-        amount = -amount
 
     user_state[uid] = {
         "pending_tx": {
             "amount": amount,
-            "category": guess_category(desc),
+            "category": cat,
             "description": desc,
         }
     }
@@ -328,7 +420,7 @@ def handle_message(message: Message):
     
     bot.reply_to(
         message,
-        f"Amount: {amount:+,.0f}\nDesc: {desc}\n\nPlease select the bank account:",
+        f"Amount: {amount:+,.0f}\nDesc: {desc}\n\nXin hãy chọn tài khoản:",
         reply_markup=markup
     )
 
@@ -481,13 +573,46 @@ def handle_capitalize_flow(message: Message):
 def guess_category(desc):
     desc_lower = desc.lower()
     categories = {
-        "food": ["food", "eat", "lunch", "dinner", "breakfast", "grocer"],
-        "transport": ["transport", "taxi", "grab", "bus", "fuel", "gas", "parking"],
-        "salary": ["salary", "income", "bonus", "wage"],
-        "entertainment": ["entertain", "movie", "game", "netflix", "spotify"],
-        "bill": ["bill", "electric", "water", "internet", "phone", "rent"],
-        "health": ["health", "doctor", "medicine", "hospital", "gym"],
-        "shopping": ["shop", "buy", "purchase", "cloth", "shoe"],
+        "food": [
+            "food", "eat", "lunch", "dinner", "breakfast", "grocer", "ăn", "uống", "cơm", "phở", "bún", "hủ tiếu", "cháo",
+            "miến", "mì", "bánh", "trà sữa", "cafe", "cà phê", "nước", "nhậu", "hải sản", "lẩu", "nướng", "kfc", "lotteria",
+            "highland", "starbucks", "phúc long", "phuc long", "thức ăn", "thực phẩm", "siêu thị", "chợ", "rau", "thịt", "cá",
+            "trái cây", "hoa quả", "kẹo", "snack", "gà", "bò", "heo", "trưa", "tối", "sáng", "khuya", "ăn vặt", "nấu",
+            "pizza", "burger", "mcdonald", "tocotoco", "gongcha", "koi", "the coffee house", "tch", "bạch tuộc", "sushi", "sashimi"
+        ],
+        "transport": [
+            "transport", "taxi", "grab", "bus", "fuel", "gas", "parking", "xăng", "xe", "di chuyển", "đi lại", "vé", "tàu",
+            "máy bay", "gojek", "be", "xanh sm", "gọi xe", "đỗ xe", "gửi xe", "rửa xe", "bảo dưỡng", "sửa xe", "nhớt",
+            "thay nhớt", "cầu đường", "bot", "vetch", "epass", "grabcar", "grabbike", "xe ôm", "phà", "trạm thu phí"
+        ],
+        "salary": [
+            "salary", "income", "bonus", "wage", "lương", "thưởng", "thu nhập", "nhận", "cấp", "lì xì", "bán", "tiền vô",
+            "lãi", "cổ tức", "hoa hồng", "dự án", "freelance", "trả nợ", "hoàn tiền", "cashback", "tạm ứng", "phụ cấp"
+        ],
+        "entertainment": [
+            "entertain", "movie", "game", "netflix", "spotify", "giải trí", "phim", "cgv", "lotte", "bhd", "chơi", "du lịch",
+            "đi chơi", "hát", "karaoke", "bar", "pub", "club", "kịch", "nhạc", "youtube", "premium", "nạp", "steam",
+            "thú cưng", "mèo", "chó", "pet", "hẹn hò", "date", "đồ chơi", "tour", "khách sạn", "resort", "bida", "massage"
+        ],
+        "bill": [
+            "bill", "electric", "water", "internet", "phone", "rent", "điện", "nước", "mạng", "wifi", "cáp", "viễn thông",
+            "viettel", "fpt", "vnpt", "mobifone", "vinaphone", "thuê bao", "tiền nhà", "thuê nhà", "trọ", "phí quản lý",
+            "chung cư", "bảo vệ", "rác", "trả góp", "tín dụng", "credit", "thẻ", "khoản vay", "fe credit", "bảo hiểm", "vay"
+        ],
+        "health": [
+            "health", "doctor", "medicine", "hospital", "gym", "khám", "bệnh", "thuốc", "nhà thuốc", "pharmacity", "long châu",
+            "bác sĩ", "nha khoa", "răng", "mắt", "kính", "tập", "thể thao", "yoga", "fitness", "cali", "thực phẩm chức năng",
+            "vitamin", "bảo hiểm y tế", "viện phí", "xét nghiệm", "sức khỏe", "massage", "spa", "chăm sóc"
+        ],
+        "shopping": [
+            "shop", "buy", "purchase", "cloth", "shoe", "mua sắm", "quần", "áo", "giày", "dép", "túi", "ví", "balo",
+            "mỹ phẩm", "skincare", "son", "shopee", "lazada", "tiki", "tiktok", "siêu thị", "coop", "winmart", "go!",
+            "bigc", "bách hóa", "đồ gia dụng", "điện máy", "thế giới di động", "tgdd", "fpt shop", "cellphones", "điện thoại",
+            "laptop", "phụ kiện", "tai nghe", "ốp lưng", "cáp", "sạc", "quà", "tặng", "hoa", "đồ", "sách", "fahasa"
+        ],
+        "transfer": [
+            "chuyển", "rút", "transfer", "atm", "tiền mặt"
+        ]
     }
     for cat, keywords in categories.items():
         for kw in keywords:

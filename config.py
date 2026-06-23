@@ -16,4 +16,7 @@ GOOGLE_CREDENTIALS_FILE = _raw_cred if os.path.isabs(_raw_cred) else os.path.joi
 EXPENSE_SHEET_NAME = os.getenv("EXPENSE_SHEET_NAME", "My Expenses")
 PORTFOLIO_SHEET_NAME = os.getenv("PORTFOLIO_SHEET_NAME", "My Portfolio")
 
+# Gemini API
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
 os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
