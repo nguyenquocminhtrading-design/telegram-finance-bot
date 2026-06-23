@@ -46,23 +46,93 @@ def cmd_help(message: Message):
     help_text = (
         "📊 *FINANCE BOT COMMAND PANEL* 📊\n"
         "─────────────────────────────\n"
-        "📝 *Logging Transactions:*\n"
-        "  `+500 salary March`\n"
-        "  `-200 lunch`\n"
-        "  `-10000 laptop` (can be capitalized)\n\n"
-        "💼 *Asset Management:*\n"
-        "  `/buy <asset> <qty> <price>` - Buy asset\n"
-        "  `/liquidate <id> <price>` - Sell asset\n"
-        "  `/asset` - View all assets\n\n"
-        "📈 *Reports & Status:*\n"
-        "  `/balance` - Current balance\n"
-        "  `/report` - Monthly report\n"
-        "  `/project <amount> <months>` - Monte Carlo Projection\n"
-        "  `/export` - Export to Excel\n"
-        "  `/web` - Dashboard link\n"
+        "🤖 *AI tự động nhận diện tiếng Việt:*\n"
+        "  `ăn cơm 50k vcb`\n"
+        "  `nhận lương 15tr acb`\n"
+        "  `chuyển 2tr từ VCB sang CASH`\n\n"
+        "📝 *Cú pháp truyền thống:*\n"
+        "  `+500 salary` / `-200 lunch`\n"
+        "  `-10tr laptop` (có thể vốn hóa tài sản)\n\n"
+        "💳 *Tài khoản hỗ trợ:* VCB · ACB · HDBANK · CASH\n\n"
+        "💸 *Chuyển tiền giữa tài khoản:*\n"
+        "  `chuyển 5tr từ VCB sang ACB`\n"
+        "  `/transfer <amount> <from> <to>`\n\n"
+        "💰 *Số dư ban đầu:*\n"
+        "  `/setbalance <bank> <amount>` - Ghi số dư mở đầu\n"
+        "  Ví dụ: `/setbalance VCB 5000000`\n\n"
+        "💼 *Quản lý Tài sản:*\n"
+        "  `/buy <asset> <qty> <price>` - Mua tài sản\n"
+        "  `/liquidate <id> <price>` - Bán tài sản\n"
+        "  `/asset` - Xem danh mục tài sản\n\n"
+        "📈 *Báo cáo & Thống kê:*\n"
+        "  `/balance` - Tổng số dư hiện tại\n"
+        "  `/bankbalance` - Số dư từng tài khoản\n"
+        "  `/report` - Báo cáo tháng này\n"
+        "  `/project <amount> <months>` - Monte Carlo\n"
+        "  `/export` - Xuất file Excel\n"
+        "  `/web` - Mở Dashboard\n"
         "─────────────────────────────"
     )
     bot.reply_to(message, help_text, parse_mode="Markdown")
+
+
+@bot.message_handler(commands=["setbalance"])
+def cmd_setbalance(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) < 3:
+        bot.reply_to(message, "Cách dùng: /setbalance <bank> <amount>\nVí dụ: /setbalance VCB 5000000")
+        return
+    bank = parts[1].upper()
+    try:
+        amount = float(parts[2].replace(",", "").replace(".", ""))
+    except ValueError:
+        bot.reply_to(message, "Số tiền không hợp lệ.")
+        return
+
+    # Ghi 1 giao dịch đặc biệt loại "initial_balance"
+    tid = add_transaction(
+        message.from_user.id, amount, "initial_balance",
+        f"Số dư ban đầu {bank}", is_asset=0, bank_account=bank
+    )
+    # Sync lên Google Sheets
+    sync_expense_to_gsheet({
+        "date": datetime.now().isoformat()[:10],
+        "amount": amount,
+        "category": "initial_balance",
+        "description": f"Số dư ban đầu {bank}",
+        "bank_account": bank
+    })
+    bot.reply_to(message, f"✅ Đã ghi số dư ban đầu {bank}: {amount:+,.0f} VND")
+
+@bot.message_handler(commands=["bankbalance"])
+def cmd_bankbalance(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    from database import get_db
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT bank_account, SUM(amount) as balance
+           FROM transactions
+           WHERE bank_account IS NOT NULL AND bank_account != ''
+           GROUP BY bank_account
+           ORDER BY balance DESC"""
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        bot.reply_to(message, "Chưa có giao dịch nào có thông tin ngân hàng.")
+        return
+
+    total = sum(r["balance"] for r in rows)
+    lines = ["💳 *Số dư theo tài khoản:*", ""]
+    for r in rows:
+        sign = "+" if r["balance"] >= 0 else ""
+        lines.append(f"  {r['bank_account']}: `{sign}{r['balance']:,.0f}` VND")
+    lines.append("")
+    lines.append(f"  *TỔNG: `{total:+,.0f}` VND*")
+    bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
 
 @bot.message_handler(commands=["balance"])
 def cmd_balance(message: Message):
