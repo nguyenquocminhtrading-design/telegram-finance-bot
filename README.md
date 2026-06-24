@@ -523,9 +523,19 @@ python app.py
 
 ### PythonAnywhere (Free Tier)
 
-1. **Create web app**: Manual configuration → Python 3.10+
-2. **Upload code**: Git clone or manual upload via Files tab
-3. **Install deps**: `pip install --user -r requirements.txt`
+> ⚠️ **PythonAnywhere dùng Python 3.11.** LUÔN dùng `python3.11` và `pip3.11`, KHÔNG dùng `py` hay `pip`.
+> Xem hướng dẫn chi tiết: [`PYTHONANYWHERE_SETUP.md`](PYTHONANYWHERE_SETUP.md)
+
+1. **Create web app**: Manual configuration → Python 3.11
+2. **Clone code**:
+   ```bash
+   git clone https://github.com/nguyenquocminhtrading-design/telegram-finance-bot.git
+   cd telegram-finance-bot
+   ```
+3. **Install deps** (bắt buộc dùng `pip3.11`):
+   ```bash
+   pip3.11 install --user -r requirements.txt
+   ```
 4. **WSGI file** (`/var/www/yourusername_pythonanywhere_com_wsgi.py`):
    ```python
    import sys
@@ -535,9 +545,14 @@ python app.py
    from app import app as application
    ```
 5. **Set webhook**:
-   ```python
+   ```bash
+   cd ~/telegram-finance-bot
+   python3.11 -c "
+   from config import TELEGRAM_TOKEN, WEBHOOK_URL
    import requests
-   requests.get(f"https://api.telegram.org/bot{TOKEN}/setWebhook?url=https://yourusername.pythonanywhere.com/webhook/{TOKEN}")
+   url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={WEBHOOK_URL}/webhook/{TELEGRAM_TOKEN}'
+   print(requests.get(url).json())
+   "
    ```
 6. **Keep alive**: Set up a cron-job.org task or PythonAnywhere scheduled task to ping `/ping` every 5 minutes (free tier sleeps after inactivity).
 
