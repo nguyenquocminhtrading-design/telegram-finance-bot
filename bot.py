@@ -55,7 +55,7 @@ def cmd_help(message: Message):
         "  `chuyển 2tr từ VCB sang CASH`\n\n"
         "📝 *Cú pháp truyền thống:*\n"
         "  `+500 salary` / `-200 lunch`\n"
-        "  `-10tr laptop` (có thể vốn hóa tài sản)\n\n"
+        "  `-500k bàn phím` (≥200k → hỏi vốn hóa)\n\n"
         "💳 *Tài khoản hỗ trợ:* VCB · ACB · HDBANK · CASH\n\n"
         "💸 *Chuyển tiền giữa tài khoản:*\n"
         "  `chuyển 5tr từ VCB sang ACB`\n"
@@ -69,8 +69,8 @@ def cmd_help(message: Message):
         "  `/asset` - Xem danh mục tài sản\n"
         "  `/nav <id> [ticker]` - Cập nhật NAV cho 1 tài sản\n"
         "  `/refresh` - Cập nhật NAV tất cả tài sản\n"
-        "  *Vốn hóa tự động:* Chi tiêu >1tr → bot hỏi \"có vốn hóa?\"\n"
-        "    → Nhập tên TS → nhập tháng KH → tự động theo dõi\n\n"
+        "  *Vốn hóa tự động:* Chi tiêu ≥200k → bot hỏi \"có vốn hóa?\"\n"
+        "    → Nhập tên TS → nhập tháng KH → tự động theo dõi + khấu hao\n\n"
         "🔄 *Đồng bộ dữ liệu:*\n"
         "  `/sync` - Import dữ liệu từ Google Sheets vào SQLite\n\n"
         "📈 *Báo cáo & Thống kê:*\n"
@@ -728,7 +728,7 @@ def handle_callback(call):
         
         bot.delete_message(call.message.chat.id, call.message.message_id)
         
-        if amount < -1000:
+        if amount < -200:
             markup = InlineKeyboardMarkup()
             markup.add(
                 InlineKeyboardButton("Yes - capitalize", callback_data=f"cap_{tid}_{abs(amount)}"),
@@ -810,17 +810,23 @@ def handle_capitalize_flow(message: Message):
             f"Use /asset to track it.",
         )
         
-        # Sync to Portfolio Google Sheet
-        gs_ok, gs_err = sync_asset_to_gsheet({
+        # Sync to Capitalized Assets tab in My Expenses
+        from gsheets_sync import sync_capitalized_asset
+        gs_ok, gs_err = sync_capitalized_asset({
             "date": datetime.now().isoformat()[:10],
             "name": name,
-            "value": value,
-            "note": "Capitalized asset"
-        }, is_buy=True)
+            "original_value": value,
+            "remaining_value": value,
+            "months": months,
+            "monthly_depr": round(value / months, 2),
+            "depreciated_sofar": 0,
+            "status": "Active",
+            "note": "Capitalized from expense",
+        })
         if not gs_ok:
             bot.send_message(
                 uid,
-                f"⚠️ *Cảnh báo:* Không sync tài sản vào Google Sheet!\n"
+                f"⚠️ *Cảnh báo:* Không sync vào Capitalized Assets!\n"
                 f"Dữ liệu đã lưu vào database local.\n"
                 f"Lỗi: `{gs_err}`",
                 parse_mode="Markdown"

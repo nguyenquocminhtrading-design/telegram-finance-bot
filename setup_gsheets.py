@@ -91,6 +91,45 @@ def setup_summary_sheet(client):
     except Exception as e:
         print(f"ERROR setting up Summary sheet: {e}")
 
+CAP_ASSET_HEADERS = ["Ngày", "Tên tài sản", "Giá gốc", "Giá còn lại", "Số tháng KH", "KH/tháng", "Đã KH", "Trạng thái", "Ghi chú"]
+DEPR_HEADERS = ["Ngày", "Tên tài sản", "Kỳ KH", "Giá trị KH", "Giá còn lại"]
+
+def setup_capitalized_assets_tab(sheet):
+    print("\n--- Setup Capitalized Assets Tab ---")
+    try:
+        try:
+            ws = sheet.worksheet("Capitalized Assets")
+            print("Tab 'Capitalized Assets' already exists.")
+        except gspread.exceptions.WorksheetNotFound:
+            ws = sheet.add_worksheet(title="Capitalized Assets", rows="200", cols="10")
+            ws.append_row(CAP_ASSET_HEADERS, value_input_option="USER_ENTERED", table_range="A1")
+            print("Created tab 'Capitalized Assets'.")
+
+        apply_header_formatting(ws, num_cols=9)
+        apply_currency_formatting(ws, "C")
+        apply_currency_formatting(ws, "D")
+        apply_currency_formatting(ws, "F")
+        apply_currency_formatting(ws, "G")
+    except Exception as e:
+        print(f"  ⚠️ Could not setup Capitalized Assets tab: {e}")
+
+def setup_depreciation_log_tab(sheet):
+    print("\n--- Setup Depreciation Log Tab ---")
+    try:
+        try:
+            ws = sheet.worksheet("Depreciation Log")
+            print("Tab 'Depreciation Log' already exists.")
+        except gspread.exceptions.WorksheetNotFound:
+            ws = sheet.add_worksheet(title="Depreciation Log", rows="500", cols="6")
+            ws.append_row(DEPR_HEADERS, value_input_option="USER_ENTERED", table_range="A1")
+            print("Created tab 'Depreciation Log'.")
+
+        apply_header_formatting(ws, num_cols=5)
+        apply_currency_formatting(ws, "D")
+        apply_currency_formatting(ws, "E")
+    except Exception as e:
+        print(f"  ⚠️ Could not setup Depreciation Log tab: {e}")
+
 def setup():
     print("Connecting to Google Cloud...")
     if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
@@ -127,9 +166,13 @@ def setup():
         else:
             print("Expense sheet already has correct headers.")
 
-        # Apply formatting regardless (idempotent)
         apply_header_formatting(worksheet, num_cols=5)
         apply_currency_formatting(worksheet, amount_col_letter="B")
+
+        # Capitalized Assets tab (in My Expenses)
+        setup_capitalized_assets_tab(sheet)
+        # Depreciation Log tab (in My Expenses)
+        setup_depreciation_log_tab(sheet)
 
     except gspread.exceptions.SpreadsheetNotFound:
         print(f"ERROR: Cannot find '{EXPENSE_SHEET_NAME}'. Please create it and share with the Service Account.")

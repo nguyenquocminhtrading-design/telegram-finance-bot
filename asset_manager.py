@@ -6,6 +6,7 @@ from database import (
     deactivate_asset,
     log_depreciation,
     add_transaction,
+    get_db,
 )
 
 
@@ -52,6 +53,28 @@ def run_monthly_depreciation(user_id=0, reference_date=None):
             "remaining": remaining,
             "fully_depreciated": is_done,
         })
+
+        # Sync depreciation to Google Sheets
+        try:
+            from gsheets_sync import sync_depreciation_log, update_capitalized_asset_value
+            sync_depreciation_log({
+                "date": reference_date.isoformat(),
+                "asset_name": asset["name"],
+                "period": month_key,
+                "amount": dep_amount,
+                "remaining_value": remaining,
+            })
+            conn = get_db()
+            row = conn.execute(
+                "SELECT original_value FROM assets WHERE id = ?", (aid,)
+            ).fetchone()
+            conn.close()
+            original = row["original_value"] if row else 0
+            depreciated_sofar = round(original - remaining, 2)
+            status = "Fully Depreciated" if is_done else "Active"
+            update_capitalized_asset_value(asset["name"], remaining, depreciated_sofar, status)
+        except Exception as e:
+            print(f"[Depreciation] Sheet sync error for {asset['name']}: {e}")
 
     return results
 

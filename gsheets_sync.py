@@ -149,3 +149,105 @@ def sync_asset_to_gsheet(asset_data, is_buy=True):
         msg = f"Lỗi ghi vào Google Sheet Portfolio: {e}"
         print(f"[GSheets] {msg}")
         return False, msg
+
+
+def sync_capitalized_asset(asset_data):
+    """
+    Ghi tài sản đã vốn hóa vào tab 'Capitalized Assets' trong My Expenses.
+
+    asset_data: dict với các key:
+        date, name, original_value, remaining_value, months, monthly_depr,
+        depreciated_sofar, status, note
+    """
+    client, auth_err = get_gspread_client()
+    if not client:
+        return False, auth_err
+    try:
+        sheet = client.open(EXPENSE_SHEET_NAME)
+        try:
+            worksheet = sheet.worksheet("Capitalized Assets")
+        except gspread.exceptions.WorksheetNotFound:
+            return False, "Tab 'Capitalized Assets' not found. Run setup_gsheets.py first."
+
+        row_data = [
+            asset_data.get("date", date.today().isoformat()),
+            asset_data.get("name", ""),
+            asset_data.get("original_value", 0),
+            asset_data.get("remaining_value", 0),
+            asset_data.get("months", 0),
+            asset_data.get("monthly_depr", 0),
+            asset_data.get("depreciated_sofar", 0),
+            asset_data.get("status", "Active"),
+            asset_data.get("note", ""),
+        ]
+        worksheet.append_row(row_data, value_input_option="USER_ENTERED", table_range="A1")
+        print(f"[GSheets] Capitalized asset synced: {asset_data.get('name')}")
+        return True, None
+    except Exception as e:
+        msg = f"Lỗi ghi Capitalized Assets: {e}"
+        print(f"[GSheets] {msg}")
+        return False, msg
+
+
+def sync_depreciation_log(depr_data):
+    """
+    Ghi lịch sử khấu hao vào tab 'Depreciation Log' trong My Expenses.
+
+    depr_data: dict với các key:
+        date, asset_name, period, amount, remaining_value
+    """
+    client, auth_err = get_gspread_client()
+    if not client:
+        return False, auth_err
+    try:
+        sheet = client.open(EXPENSE_SHEET_NAME)
+        try:
+            worksheet = sheet.worksheet("Depreciation Log")
+        except gspread.exceptions.WorksheetNotFound:
+            return False, "Tab 'Depreciation Log' not found. Run setup_gsheets.py first."
+
+        row_data = [
+            depr_data.get("date", date.today().isoformat()),
+            depr_data.get("asset_name", ""),
+            depr_data.get("period", ""),
+            depr_data.get("amount", 0),
+            depr_data.get("remaining_value", 0),
+        ]
+        worksheet.append_row(row_data, value_input_option="USER_ENTERED", table_range="A1")
+        print(f"[GSheets] Depreciation log synced: {depr_data.get('asset_name')} - {depr_data.get('period')}")
+        return True, None
+    except Exception as e:
+        msg = f"Lỗi ghi Depreciation Log: {e}"
+        print(f"[GSheets] {msg}")
+        return False, msg
+
+
+def update_capitalized_asset_value(asset_name, new_remaining, new_depreciated_sofar, new_status="Active"):
+    """Update giá trị còn lại + đã KH + trạng thái trong Capitalized Assets tab."""
+    client, auth_err = get_gspread_client()
+    if not client:
+        return False, auth_err
+    try:
+        sheet = client.open(EXPENSE_SHEET_NAME)
+        worksheet = sheet.worksheet("Capitalized Assets")
+        all_rows = worksheet.get_all_values()
+        if len(all_rows) < 2:
+            return False, "No data rows"
+        headers = all_rows[0]
+        name_col = headers.index("Tên tài sản")
+        remaining_col = headers.index("Giá còn lại") + 1
+        depr_col = headers.index("Đã KH") + 1
+        status_col = headers.index("Trạng thái") + 1
+
+        for i, row in enumerate(all_rows[1:], start=2):
+            if row[name_col].strip() == asset_name.strip():
+                worksheet.update_cell(i, remaining_col, new_remaining)
+                worksheet.update_cell(i, depr_col, new_depreciated_sofar)
+                worksheet.update_cell(i, status_col, new_status)
+                print(f"[GSheets] Updated capitalized asset: {asset_name}")
+                return True, None
+        return False, f"Asset '{asset_name}' not found in Capitalized Assets tab"
+    except Exception as e:
+        msg = f"Lỗi update Capitalized Assets: {e}"
+        print(f"[GSheets] {msg}")
+        return False, msg
