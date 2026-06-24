@@ -58,6 +58,18 @@ def init_db():
         conn.execute("ALTER TABLE transactions ADD COLUMN bank_account TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass
+    try:
+        conn.execute("ALTER TABLE assets ADD COLUMN ticker TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE assets ADD COLUMN last_nav REAL DEFAULT NULL")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE assets ADD COLUMN last_nav_date TEXT DEFAULT NULL")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 

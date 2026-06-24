@@ -6,6 +6,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from config import DATABASE_PATH
 from asset_manager import run_monthly_depreciation
+from gsheets_reader import sync_all_from_sheets
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,14 @@ def create_scheduler():
         hour=0,
         minute=5,
         id="monthly_depreciation",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        sync_all_from_sheets,
+        "interval",
+        minutes=30,
+        id="sheets_sync",
         replace_existing=True,
     )
 

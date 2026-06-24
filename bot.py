@@ -1,18 +1,21 @@
 import re
+import os
 from datetime import datetime
 import telebot
 from telebot.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 import io
 import openpyxl
 
-from config import TELEGRAM_TOKEN, ADMIN_USER_ID, WEBHOOK_URL
+from config import TELEGRAM_TOKEN, ADMIN_USER_ID, WEBHOOK_URL, DATABASE_PATH
 from database import add_transaction, get_transactions, get_assets, get_categories, update_transaction
 from database import add_asset
 from asset_manager import get_asset_summary, liquidate_asset
 from finance_logic import get_balance, get_monthly_summary, get_category_breakdown
 from gsheets_sync import sync_expense_to_gsheet, sync_asset_to_gsheet
+from gsheets_reader import sync_all_from_sheets, read_expenses_from_sheet, read_portfolio_from_sheet
 from excel_sync import sync_expense_to_excel
 from simulation import run_monte_carlo, generate_projection_chart
+from nav_fetcher import fetch_nav_from_vnsignal, update_asset_nav, refresh_all_assets, add_ticker_column
 from llm_parser import parse_transaction
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
@@ -64,15 +67,26 @@ def cmd_help(message: Message):
         "  `/buy <asset> <qty> <price>` - Mua tài sản\n"
         "  `/liquidate <id> <price>` - Bán tài sản\n"
         "  `/asset` - Xem danh mục tài sản\n"
+        "  `/nav <id> [ticker]` - Cập nhật NAV cho 1 tài sản\n"
+        "  `/refresh` - Cập nhật NAV tất cả tài sản\n"
         "  *Vốn hóa tự động:* Chi tiêu >1tr → bot hỏi \"có vốn hóa?\"\n"
         "    → Nhập tên TS → nhập tháng KH → tự động theo dõi\n\n"
+        "🔄 *Đồng bộ dữ liệu:*\n"
+        "  `/sync` - Import dữ liệu từ Google Sheets vào SQLite\n\n"
         "📈 *Báo cáo & Thống kê:*\n"
         "  `/balance` - Tổng số dư hiện tại\n"
         "  `/bankbalance` - Số dư từng tài khoản\n"
         "  `/report` - Báo cáo tháng này\n"
         "  `/project <amount> <months>` - Monte Carlo\n"
         "  `/export` - Xuất file Excel\n"
-        "  `/web` - Mở Dashboard\n"
+        "  `/web` - Mở Dashboard\n\n"
+        "🔧 *Debug & Kiểm tra:*\n"
+        "  `/ping` - Kiểm tra bot còn sống\n"
+        "  `/dbcheck` - Thống kê database\n"
+        "  `/gscheck` - Kiểm tra Google Sheets\n"
+        "  `/envcheck` - Kiểm tra biến môi trường\n"
+        "  `/logs <n>` - Xem n dòng log gần nhất\n"
+        "  `/navtest <ticker>` - Test fetch NAV\n"
         "─────────────────────────────"
     )
     bot.reply_to(message, help_text, parse_mode="Markdown")
@@ -187,6 +201,69 @@ def cmd_web(message: Message):
         bot.reply_to(message, f"Dashboard: {base}/dashboard\nOr open Mini App below:", reply_markup=markup)
     else:
         bot.reply_to(message, f"Dashboard: {base}/dashboard\n(Mini App requires HTTPS webhook URL)")
+
+@bot.message_handler(commands=["nav"])
+def cmd_nav(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) < 2:
+        bot.reply_to(message, "Cách dùng: `/nav <asset_id>` hoặc `/nav <asset_id> <ticker>`\nVD: `/nav 1 DCDS`", parse_mode="Markdown")
+        return
+    try:
+        aid = int(parts[1])
+    except ValueError:
+        bot.reply_to(message, "Asset ID không hợp lệ")
+        return
+    ticker = parts[2].upper() if len(parts) >= 3 else None
+    msg = bot.reply_to(message, f"Đang lấy NAV cho asset #{aid}...")
+    ok, result = update_asset_nav(aid, ticker)
+    if not ok:
+        bot.edit_message_text(f"❌ {result}", msg.chat.id, msg.message_id)
+        return
+    bot.edit_message_text(
+        f"✅ *{result['name']}* — NAV cập nhật\n"
+        f"NAV/CCQ: `{result['nav']:,.0f} VND`\n"
+        f"Giá trị tài sản: `{result['new_value']:,.0f} VND`\n"
+        f"Ngày: {result['date']}",
+        msg.chat.id, msg.message_id, parse_mode="Markdown"
+    )
+
+@bot.message_handler(commands=["refresh"])
+def cmd_refresh(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    msg = bot.reply_to(message, "Đang cập nhật NAV cho tất cả tài sản có ticker...")
+    results = refresh_all_assets()
+    lines = ["✅ *Refresh NAV hoàn tất*", ""]
+    ok_count = sum(1 for r in results if r["ok"])
+    lines.append(f"Thành công: {ok_count}/{len(results)}")
+    for r in results:
+        icon = "✅" if r["ok"] else "❌"
+        name = r["name"]
+        if r["ok"]:
+            d = r["data"]
+            lines.append(f"{icon} {name}: `{d['nav']:,.0f}` (ngày {d['date']})")
+        else:
+            lines.append(f"{icon} {name}: {r['data']}")
+    bot.edit_message_text("\n".join(lines), msg.chat.id, msg.message_id, parse_mode="Markdown")
+
+@bot.message_handler(commands=["sync"])
+def cmd_sync(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    msg = bot.reply_to(message, "Đang đồng bộ dữ liệu từ Google Sheets vào SQLite...")
+    results = sync_all_from_sheets()
+    lines = ["✅ *Đồng bộ hoàn tất*", ""]
+    e = results["expenses"]
+    lines.append(f"📄 *Expenses:* {e['imported']} imported, {e['skipped']} skipped")
+    if e["error"]:
+        lines.append(f"  ⚠️ Lỗi: {e['error']}")
+    p = results["portfolio"]
+    lines.append(f"💼 *Portfolio:* {p['imported']} imported, {p['skipped']} skipped")
+    if p["error"]:
+        lines.append(f"  ⚠️ Lỗi: {p['error']}")
+    bot.edit_message_text("\n".join(lines), msg.chat.id, msg.message_id, parse_mode="Markdown")
 
 @bot.message_handler(commands=["project", "montecarlo"])
 def cmd_project(message: Message):
@@ -351,6 +428,115 @@ def cmd_sell(message: Message):
     if not is_admin(message.from_user.id):
         return
     bot.reply_to(message, "To sell, use /liquidate <asset_id> <sell_price> for now.")
+
+@bot.message_handler(commands=["ping"])
+def cmd_ping(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    bot.reply_to(message, "pong 🏓")
+
+@bot.message_handler(commands=["dbcheck"])
+def cmd_dbcheck(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    from database import get_db, count_transactions
+    conn = get_db()
+    txn_count = conn.execute("SELECT COUNT(*) as c FROM transactions").fetchone()["c"]
+    asset_count = conn.execute("SELECT COUNT(*) as c FROM assets").fetchone()["c"]
+    active_assets = conn.execute("SELECT COUNT(*) as c FROM assets WHERE is_active=1").fetchone()["c"]
+    db_size = os.path.getsize(DATABASE_PATH) if os.path.exists(DATABASE_PATH) else 0
+    conn.close()
+    lines = [
+        "🗄️ *Database Info*",
+        f"  Transactions: {txn_count}",
+        f"  Assets: {asset_count} (active: {active_assets})",
+        f"  DB size: {db_size / 1024:.1f} KB",
+    ]
+    bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
+
+@bot.message_handler(commands=["gscheck"])
+def cmd_gscheck(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    from gsheets_reader import get_gspread_client, read_expenses_from_sheet, read_portfolio_from_sheet
+    client, err = get_gspread_client()
+    if not client:
+        bot.reply_to(message, f"❌ Google Sheets auth failed: {err}")
+        return
+    exp_data, exp_err = read_expenses_from_sheet()
+    port_data, port_err = read_portfolio_from_sheet()
+    lines = ["✅ *Google Sheets OK*", ""]
+    if exp_data is not None:
+        lines.append(f"📄 Expenses: {len(exp_data)} rows")
+    else:
+        lines.append(f"⚠️ Expenses: {exp_err}")
+    if port_data is not None:
+        lines.append(f"💼 Portfolio: {len(port_data)} rows")
+    else:
+        lines.append(f"⚠️ Portfolio: {port_err}")
+    bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
+
+@bot.message_handler(commands=["envcheck"])
+def cmd_envcheck(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    from config import TELEGRAM_TOKEN, WEBHOOK_URL, GOOGLE_CREDENTIALS_FILE, EXPENSE_SHEET_NAME, PORTFOLIO_SHEET_NAME, GEMINI_API_KEY
+    def mask(s):
+        if not s:
+            return "<empty>"
+        return s[:6] + "..." + s[-4:] if len(s) > 12 else s[:3] + "..."
+    lines = [
+        "⚙️ *Environment Check*",
+        f"  WEBHOOK_URL: {WEBHOOK_URL or '<empty>'}",
+        f"  TELEGRAM_TOKEN: {mask(TELEGRAM_TOKEN)}",
+        f"  GEMINI_API_KEY: {mask(GEMINI_API_KEY)}",
+        f"  GOOGLE_CREDENTIALS: {os.path.exists(GOOGLE_CREDENTIALS_FILE)}",
+        f"  EXPENSE_SHEET: {EXPENSE_SHEET_NAME}",
+        f"  PORTFOLIO_SHEET: {PORTFOLIO_SHEET_NAME}",
+    ]
+    bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
+
+@bot.message_handler(commands=["logs"])
+def cmd_logs(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    n = 20
+    if len(parts) >= 2:
+        try:
+            n = int(parts[1])
+            n = min(n, 100)
+        except ValueError:
+            pass
+    log_file = os.path.join(os.path.dirname(__file__), "bot.log")
+    if not os.path.exists(log_file):
+        bot.reply_to(message, "Không tìm thấy file bot.log")
+        return
+    with open(log_file, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    last_lines = lines[-n:]
+    text = f"📋 *Last {len(last_lines)} log lines*:\n```\n" + "".join(last_lines)[-3000:] + "\n```"
+    bot.reply_to(message, text, parse_mode="Markdown")
+
+@bot.message_handler(commands=["navtest"])
+def cmd_navtest(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) < 2:
+        bot.reply_to(message, "Cách dùng: `/navtest <ticker>`\nVD: `/navtest DCDS`", parse_mode="Markdown")
+        return
+    ticker = parts[1].upper()
+    msg = bot.reply_to(message, f"Đang test NAV cho {ticker}...")
+    nav, nav_date, err = fetch_nav_from_vnsignal(ticker)
+    if err:
+        bot.edit_message_text(f"❌ {err}", msg.chat.id, msg.message_id)
+        return
+    bot.edit_message_text(
+        f"✅ *{ticker}* — NAV: `{nav:,.0f} VND`\n"
+        f"  Ngày: {nav_date or 'N/A'}",
+        msg.chat.id, msg.message_id, parse_mode="Markdown"
+    )
 
 @bot.message_handler(func=lambda m: True)
 def handle_message(message: Message):

@@ -1,4 +1,5 @@
 import os
+import threading
 import logging
 from datetime import date, datetime
 
@@ -22,6 +23,15 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
 init_db()
+
+# Run initial Sheets sync in background (non-blocking)
+def _initial_sync():
+    from gsheets_reader import sync_all_from_sheets
+    logger.info("Running initial sync from Google Sheets...")
+    results = sync_all_from_sheets()
+    logger.info(f"Initial sync done - Expenses: {results['expenses']['imported']} imported, Portfolio: {results['portfolio']['imported']} imported")
+
+threading.Thread(target=_initial_sync, daemon=True).start()
 
 scheduler = create_scheduler()
 scheduler.start()
