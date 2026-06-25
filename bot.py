@@ -5,7 +5,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 import telebot
-from telebot.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from telebot.types import Message
 import io
 import openpyxl
 
@@ -58,8 +58,6 @@ def safe_api(func):
     return wrapper
 
 safe_send = safe_api(bot.send_message)
-safe_edit = safe_api(bot.edit_message_text)
-safe_answer = safe_api(bot.answer_callback_query)
 safe_reply = safe_api(bot.reply_to)
 
 def is_admin(user_id):
@@ -74,32 +72,51 @@ def parse_amount(text):
         return num * multipliers[suffix]
     return float(text)
 
-def ask_bank(uid, amount, cat, desc):
+# Bảng mapping text → tên chuẩn bank
+_BANK_ALIASES = {
+    "vcb": "VCB", "vietcombank": "VCB", "vietcom": "VCB",
+    "acb": "ACB", "asia": "ACB",
+    "hdbank": "HDBANK", "hd": "HDBANK",
+    "cash": "CASH", "tiền mặt": "CASH", "tien mat": "CASH", "mặt": "CASH", "tienmat": "CASH",
+    "momo": "MOMO", "ví momo": "MOMO", "vi momo": "MOMO",
+}
+
+def resolve_bank_text(text):
+    """Chuyển text tự do → tên bank chuẩn (VCB/ACB/HDBANK/CASH/MOMO). Trả None nếu không khớp."""
+    t = text.strip().lower()
+    if t in _BANK_ALIASES:
+        return _BANK_ALIASES[t]
+    t_upper = text.strip().upper()
+    if t_upper in VALID_BANKS:
+        return t_upper
+    # Partial match
+    for alias, bank in _BANK_ALIASES.items():
+        if alias in t:
+            return bank
+    return None
+
+BANK_LIST_STR = " / ".join(VALID_BANKS)  # "VCB / ACB / HDBANK / CASH / MOMO"
+
+def ask_bank_text(uid, amount, cat, desc):
+    """Hỏi bank bằng text — không dùng nút ảo."""
     save_state(uid, {"pending_bank": {"amount": amount, "category": cat, "desc": desc}})
-    markup = InlineKeyboardMarkup(row_width=3)
-    markup.add(*(InlineKeyboardButton(b, callback_data=f"bank:{b}") for b in VALID_BANKS))
     bot.send_message(uid,
-        f"Amount: {amount:+,.0f}\nDesc: {desc}\nWhich bank?",
-        reply_markup=markup)
+        f"💰 {amount:+,.0f} VND | {desc}\n"
+        f"Tài khoản? ({BANK_LIST_STR})")
 
-def ask_transfer_from(uid, amount):
-    """Ask user: which bank to transfer FROM (inline keyboard)"""
+def ask_transfer_from_text(uid, amount):
+    """Hỏi tài khoản nguồn bằng text."""
     save_state(uid, {"pending_transfer_pick": {"amount": amount, "step": "from"}})
-    markup = InlineKeyboardMarkup(row_width=3)
-    markup.add(*(InlineKeyboardButton(b, callback_data=f"trfrom:{b}") for b in VALID_BANKS))
     bot.send_message(uid,
-        f"💸 Chuyển: {abs(amount):,.0f} VND\nTừ tài khoản nào?",
-        reply_markup=markup)
+        f"💸 Chuyển: {abs(amount):,.0f} VND\n"
+        f"Từ tài khoản? ({BANK_LIST_STR})")
 
-def ask_transfer_to(uid, amount, from_bank):
-    """Ask user: which bank to transfer TO (inline keyboard)"""
+def ask_transfer_to_text(uid, amount, from_bank):
+    """Hỏi tài khoản đích bằng text (loại from_bank ra)."""
+    others = " / ".join(b for b in VALID_BANKS if b != from_bank)
     save_state(uid, {"pending_transfer_pick": {"amount": amount, "step": "to", "from_bank": from_bank}})
-    others = [b for b in VALID_BANKS if b != from_bank]
-    markup = InlineKeyboardMarkup(row_width=3)
-    markup.add(*(InlineKeyboardButton(b, callback_data=f"trto:{b}") for b in others))
     bot.send_message(uid,
-        f"💸 Chuyển: {abs(amount):,.0f} VND\nTừ: {from_bank}\nSang tài khoản nào?",
-        reply_markup=markup)
+        f"💸 Từ: {from_bank} → Sang tài khoản? ({others})")
 
 def do_transfer(uid, amount, desc, from_bank, to_bank):
     """
@@ -161,29 +178,39 @@ def cmd_help(message: Message):
     if not is_admin(message.from_user.id):
         return
     help_text = (
-        "📊 *FINANCE BOT COMMAND PANEL* 📊\n"
+        "📊 *FINANCE BOT — HƯỚNG DẪN* 📊\n"
         "─────────────────────────────\n"
-        "🤖 *Tự động nhận diện:*\n"
-        "  `ăn cơm 50k vcb`\n"
-        "  `nhận lương 15tr acb`\n"
-        "  `chuyển 2tr từ VCB sang CASH`\n\n"
-        "📝 *Cú pháp:* `+500 salary` / `-200 lunch`\n\n"
-        "💳 *Tài khoản:* VCB · ACB · HDBANK · CASH · MOMO\n\n"
-        "💸 *Chuyển tiền:* `chuyển 5tr từ VCB sang ACB`\n\n"
-        "💰 `/setbalance <bank> <amount>` - Số dư ban đầu\n\n"
-        "💼 `/buy <asset> <qty> <price>` - Mua tài sản\n"
-        "  `/liquidate <id> <price>` - Bán tài sản\n"
-        "  `/asset` - Danh mục tài sản\n"
-        "  `/nav <id> [ticker]` - Cập nhật NAV\n"
-        "  `/refresh` - Refresh NAV tất cả\n\n"
-        "📈 `/balance` - Số dư\n"
-        "  `/bankbalance` - Số dư từng tài khoản\n"
-        "  `/report` - Báo cáo tháng\n"
-        "  `/project` - Monte Carlo\n"
-        "  `/export` - Excel\n"
-        "  `/web` - Dashboard\n\n"
-        "🔄 `/sync` - Đồng bộ Google Sheets\n\n"
-        "🔧 `/ping` `/dbcheck` `/gscheck` `/envcheck` `/logs` `/navtest`"
+        "🗣 *Nhắn tự nhiên (không cần lệnh):*\n"
+        "  `-70 xăng vcb` — chi tiêu\n"
+        "  `nhận lương 15tr acb` — thu nhập\n"
+        "  `ăn cơm 50k` — bot tự hỏi tài khoản\n\n"
+        "💸 *Chuyển tiền (2 cách):*\n"
+        "  1️⃣ Nhắn: `chuyển 2tr từ VCB sang ACB`\n"
+        "  2️⃣ Lệnh: `/transfer 2000000 VCB ACB`\n"
+        "     hoặc: `/transfer 2tr VCB ACB`\n\n"
+        "💳 *Tài khoản hỗ trợ:*\n"
+        "  `VCB` · `ACB` · `HDBANK` · `CASH` · `MOMO`\n\n"
+        "💰 *Số dư & Báo cáo:*\n"
+        "  `/balance` — tổng số dư\n"
+        "  `/bankbalance` — số dư từng tài khoản\n"
+        "  `/report` — báo cáo tháng (thu, chi, phân loại)\n"
+        "  `/setbalance <bank> <amount>` — đặt số dư ban đầu\n\n"
+        "📦 *Tài sản:*\n"
+        "  `/asset` — danh mục tài sản\n"
+        "  `/buy <tên> <số lượng> <giá>` — mua tài sản đầu tư\n"
+        "  `/liquidate <id> <giá>` — bán / thanh lý\n"
+        "  `/nav <id> [ticker]` — cập nhật NAV quỹ\n"
+        "  `/refresh` — refresh NAV tất cả tài sản\n\n"
+        "📊 *Công cụ:*\n"
+        "  `/project [monthly] [months]` — Monte Carlo projection\n"
+        "  `/export` — xuất file Excel\n"
+        "  `/sync` — đồng bộ từ Google Sheets\n"
+        "  `/web` — link Web Dashboard\n\n"
+        "🔧 *Debug:*\n"
+        "  `/ping` `/dbcheck` `/gscheck` `/envcheck` `/logs` `/navtest`\n\n"
+        "💡 *Vốn hóa tài sản:*\n"
+        "  Chi tiêu ≥ 200,000 VND → bot hỏi có vốn hóa không\n"
+        "  Trả lời: `yes` hoặc `no`"
     )
     bot.reply_to(message, help_text, parse_mode="Markdown")
 
@@ -516,127 +543,46 @@ def cmd_navtest(message: Message):
         return
     bot.edit_message_text(f"✅ {ticker}: `{nav:,.0f}` ({dt})", msg.chat.id, msg.message_id, parse_mode="Markdown")
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("bank:"))
-def handle_bank_callback(call: CallbackQuery):
-    uid = call.from_user.id
-    if not is_admin(uid):
-        safe_answer(call.id, "Access denied.")
+@bot.message_handler(commands=["transfer"])
+def cmd_transfer(message: Message):
+    """
+    /transfer <amount> <from_bank> <to_bank>
+    Ví dụ: /transfer 2000000 VCB ACB
+            /transfer 2tr VCB ACB
+    """
+    if not is_admin(message.from_user.id):
         return
-    safe_answer(call.id)
-    bank = call.data.split(":", 1)[1]
-    loaded = load_state(uid)
-    if "pending_bank" not in loaded:
-        # Remove keyboard from the old message so user can't click again
-        safe_edit("⚠️ Session expired. Please send the transaction again.",
-                  uid, call.message.message_id, reply_markup=None)
+    uid = message.from_user.id
+    parts = message.text.split(maxsplit=3)
+    if len(parts) < 4:
+        bot.reply_to(message,
+            "💸 Cú pháp: /transfer <số tiền> <từ> <sang>\n"
+            f"Ví dụ: /transfer 2tr VCB ACB\n"
+            f"Tài khoản: {BANK_LIST_STR}")
         return
-    state = loaded["pending_bank"]
     try:
-        tid = add_transaction(uid, state["amount"], state["category"], state["desc"],
-                              is_asset=0, bank_account=bank)
-        clear_state(uid)
-        bal = get_balance()
-        text = f"✅ Recorded: {state['amount']:+,.0f} - {state['desc']} ({bank})\nBalance: {bal:,.0f}"
-        after_tx_sync(uid, state["amount"], state["category"], state["desc"], bank, tid)
-        if state["amount"] < -199:
-            save_state(uid, {"pending_capitalize_decision": {"tid": tid, "value": abs(state["amount"])}})
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("✅ Yes", callback_data="cap:yes"),
-                       InlineKeyboardButton("❌ No", callback_data="cap:no"))
-            # Edit original message: replace bank keyboard with capitalize question
-            safe_edit(text + "\n\nCapitalize as asset?",
-                      uid, call.message.message_id, reply_markup=markup)
-        else:
-            # Edit original message: remove keyboard, show confirmation inline
-            safe_edit(text, uid, call.message.message_id, reply_markup=None)
-    except Exception as e:
-        logger.error(f"bank_callback error: {e}")
-        safe_send(uid, f"Error: {e}")
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("cap:"))
-def handle_cap_callback(call: CallbackQuery):
-    uid = call.from_user.id
-    if not is_admin(uid):
-        safe_answer(call.id, "Access denied.")
+        amount = parse_amount(parts[1])
+    except (ValueError, TypeError):
+        bot.reply_to(message, "❌ Số tiền không hợp lệ. VD: 2000000, 2tr, 500k")
         return
-    safe_answer(call.id)
-    choice = call.data.split(":", 1)[1]
-    loaded = load_state(uid)
-    key = "pending_capitalize_decision"
-    if key not in loaded:
-        # Remove stale keyboard
-        safe_edit("⚠️ Session expired.", uid, call.message.message_id, reply_markup=None)
+    from_bank = resolve_bank_text(parts[2])
+    to_bank = resolve_bank_text(parts[3])
+    if not from_bank:
+        bot.reply_to(message, f"❌ Tài khoản nguồn không hợp lệ: {parts[2]}\nChọn: {BANK_LIST_STR}")
         return
-    state = loaded[key]
-    # Get the existing message text (without the question) to keep it clean
-    original_text = call.message.text or ""
+    if not to_bank:
+        bot.reply_to(message, f"❌ Tài khoản đích không hợp lệ: {parts[3]}\nChọn: {BANK_LIST_STR}")
+        return
+    if from_bank == to_bank:
+        bot.reply_to(message, "❌ Tài khoản nguồn và đích không được giống nhau.")
+        return
+    desc = f"Chuyển từ {from_bank} sang {to_bank}"
     try:
-        if choice == "yes":
-            clear_state(uid)
-            save_state(uid, {"pending_capitalize": {"tid": state["tid"], "value": state["value"], "step": "ask_name"}})
-            # Remove keyboard, update message to show choice, then prompt
-            safe_edit(original_text.split("\n\nCapitalize")[0] + "\n\n📦 Capitalize: Yes",
-                      uid, call.message.message_id, reply_markup=None)
-            safe_send(uid, "What is the asset name? (e.g. MacBook Pro 14)")
-        else:
-            clear_state(uid)
-            # Remove keyboard, update message to show choice
-            safe_edit(original_text.split("\n\nCapitalize")[0] + "\n\n📝 Saved as regular expense.",
-                      uid, call.message.message_id, reply_markup=None)
-    except Exception as e:
-        logger.error(f"cap_callback error: {e}")
-        safe_send(uid, f"Error: {e}")
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("trfrom:"))
-def handle_trfrom_callback(call: CallbackQuery):
-    """User picked FROM bank for transfer → now ask TO bank"""
-    uid = call.from_user.id
-    if not is_admin(uid):
-        safe_answer(call.id, "Access denied.")
-        return
-    safe_answer(call.id)
-    from_bank = call.data.split(":", 1)[1]
-    loaded = load_state(uid)
-    state = loaded.get("pending_transfer_pick", {})
-    if not state:
-        safe_edit("⚠️ Session expired. Please send again.", uid, call.message.message_id, reply_markup=None)
-        return
-    amount = state.get("amount", 0)
-    # Update state: now pick destination
-    save_state(uid, {"pending_transfer_pick": {"amount": amount, "step": "to", "from_bank": from_bank}})
-    # Replace keyboard with "to bank" options (exclude selected source)
-    others = [b for b in VALID_BANKS if b != from_bank]
-    markup = InlineKeyboardMarkup(row_width=3)
-    markup.add(*(InlineKeyboardButton(b, callback_data=f"trto:{b}") for b in others))
-    safe_edit(
-        f"💸 Chuyển: {abs(amount):,.0f} VND\nTừ: {from_bank}\nSang tài khoản nào?",
-        uid, call.message.message_id, reply_markup=markup
-    )
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("trto:"))
-def handle_trto_callback(call: CallbackQuery):
-    """User picked TO bank → execute transfer"""
-    uid = call.from_user.id
-    if not is_admin(uid):
-        safe_answer(call.id, "Access denied.")
-        return
-    safe_answer(call.id)
-    to_bank = call.data.split(":", 1)[1]
-    loaded = load_state(uid)
-    state = loaded.get("pending_transfer_pick", {})
-    if not state or "from_bank" not in state:
-        safe_edit("⚠️ Session expired. Please send again.", uid, call.message.message_id, reply_markup=None)
-        return
-    amount = state["amount"]
-    from_bank = state["from_bank"]
-    clear_state(uid)
-    try:
-        desc = f"Chuyển từ {from_bank} sang {to_bank}"
         reply = do_transfer(uid, amount, desc, from_bank, to_bank)
-        safe_edit(reply, uid, call.message.message_id, reply_markup=None)
+        bot.reply_to(message, reply)
     except Exception as e:
-        logger.error(f"trto_callback error: {e}")
-        safe_edit(f"❌ Error: {e}", uid, call.message.message_id, reply_markup=None)
+        logger.error(f"cmd_transfer error: {e}")
+        bot.reply_to(message, f"❌ Lỗi: {e}")
 
 @bot.message_handler(func=lambda m: True)
 def handle_main_message(message: Message):
@@ -647,28 +593,55 @@ def handle_main_message(message: Message):
     text = message.text.strip()
     loaded = load_state(uid)
 
-    # --- State: pending_bank (user typing bank name) ---
+    # --- State: pending_bank (user trả lời tên bank) ---
     if "pending_bank" in loaded:
-        bank_text = text.upper()
-        bank = next((b for b in VALID_BANKS if b in bank_text or bank_text in b), None)
+        bank = resolve_bank_text(text)
         if not bank:
-            bot.reply_to(message, f"Invalid bank. Choose: {', '.join(VALID_BANKS)}")
-            return
+            bot.reply_to(message, f"❌ Không nhận ra tài khoản \"{text}\". Thử lại: {BANK_LIST_STR}")
+            return  # Giữ state → user gõ lại, không mất transaction
         state = loaded["pending_bank"]
         tid = add_transaction(uid, state["amount"], state["category"], state["desc"],
                               is_asset=0, bank_account=bank)
         clear_state(uid)
-        bal = get_balance()
-        text_reply = f"✅ Recorded: {state['amount']:+,.0f} - {state['desc']} ({bank})\nBalance: {bal:,.0f}"
         after_tx_sync(uid, state["amount"], state["category"], state["desc"], bank, tid)
-        if state["amount"] < -199:
+        bal = get_balance()
+        text_reply = f"✅ {state['amount']:+,.0f} | {state['desc']} ({bank}) | Balance: {bal:,.0f}"
+        # Hỏi vốn hóa nếu chi tiêu ≥ 200,000 VND (threshold hợp lý)
+        if state["amount"] < -200_000:
             save_state(uid, {"pending_capitalize_decision": {"tid": tid, "value": abs(state["amount"])}})
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("Yes", callback_data="cap:yes"),
-                       InlineKeyboardButton("No", callback_data="cap:no"))
-            bot.send_message(uid, text_reply + "\n\nCapitalize as asset?", reply_markup=markup)
+            bot.send_message(uid, text_reply + "\n\n💡 Vốn hóa tài sản? (yes / no)")
         else:
             bot.send_message(uid, text_reply)
+        return
+
+    # --- State: pending_transfer_pick (user trả lời bank cho transfer) ---
+    if "pending_transfer_pick" in loaded:
+        state = loaded["pending_transfer_pick"]
+        bank = resolve_bank_text(text)
+        step = state.get("step", "from")
+        amount = state.get("amount", 0)
+        if step == "from":
+            if not bank:
+                bot.reply_to(message, f"❌ Không nhận ra tài khoản. Thử lại: {BANK_LIST_STR}")
+                return  # Giữ state
+            ask_transfer_to_text(uid, amount, bank)
+        elif step == "to":
+            from_bank = state.get("from_bank")
+            if not bank:
+                others = " / ".join(b for b in VALID_BANKS if b != from_bank)
+                bot.reply_to(message, f"❌ Không nhận ra tài khoản. Thử lại: {others}")
+                return  # Giữ state
+            if bank == from_bank:
+                bot.reply_to(message, f"❌ Tài khoản đích phải khác nguồn ({from_bank}). Chọn tài khoản khác.")
+                return
+            clear_state(uid)
+            desc = f"Chuyển từ {from_bank} sang {bank}"
+            try:
+                reply = do_transfer(uid, amount, desc, from_bank, bank)
+                bot.reply_to(message, reply)
+            except Exception as e:
+                logger.error(f"transfer step error: {e}")
+                bot.reply_to(message, f"❌ Lỗi khi chuyển: {e}")
         return
 
     # --- State: pending_capitalize_decision (user typing yes/no) ---
@@ -724,15 +697,15 @@ def handle_main_message(message: Message):
     # --- TRANSFER ---
     if action == "transfer":
         if from_bank and to_bank:
-            # Both known → execute immediately
+            # Đủ thông tin → thực hiện ngay
             reply = do_transfer(uid, amount, desc, from_bank, to_bank)
             bot.reply_to(message, reply)
         elif from_bank and not to_bank:
-            # Know source, ask destination via keyboard
-            ask_transfer_to(uid, amount, from_bank)
+            # Biết from → hỏi to bằng text
+            ask_transfer_to_text(uid, amount, from_bank)
         else:
-            # Neither or only to_bank known → ask from scratch
-            ask_transfer_from(uid, amount)
+            # Không biết gì → hỏi from trước
+            ask_transfer_from_text(uid, amount)
         return
 
     # --- INCOME / EXPENSE with bank ---
@@ -740,19 +713,17 @@ def handle_main_message(message: Message):
         tid = add_transaction(uid, amount, cat, desc, is_asset=0, bank_account=bank)
         after_tx_sync(uid, amount, cat, desc, bank, tid)
         bal = get_balance()
-        text_reply = f"✅ Recorded: {amount:+,.0f} - {desc} ({bank})\nBalance: {bal:,.0f}"
-        if amount < -199:
+        text_reply = f"✅ {amount:+,.0f} | {desc} ({bank}) | Balance: {bal:,.0f}"
+        # Hỏi vốn hóa chỉ khi là chi tiêu ≥ 200,000 VND (KHÔNG phải transfer)
+        if amount < -200_000:
             save_state(uid, {"pending_capitalize_decision": {"tid": tid, "value": abs(amount)}})
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("✅ Yes", callback_data="cap:yes"),
-                       InlineKeyboardButton("❌ No", callback_data="cap:no"))
-            bot.reply_to(message, text_reply + "\n\nCapitalize as asset?", reply_markup=markup)
+            bot.reply_to(message, text_reply + "\n\n💡 Vốn hóa tài sản? (yes / no)")
         else:
             bot.reply_to(message, text_reply)
         return
 
-    # --- No bank yet -> ask ---
-    ask_bank(uid, amount, cat, desc)
+    # --- Chưa có bank → hỏi bằng text ---
+    ask_bank_text(uid, amount, cat, desc)
 
 def handle_capitalize_step(message, uid, cap):
     step = cap.get("step")

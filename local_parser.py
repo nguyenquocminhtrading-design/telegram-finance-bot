@@ -1,4 +1,5 @@
 import re
+import unicodedata
 import logging
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,8 @@ def parse_amount_local(text):
 
 
 def parse_transaction_local(text):
+    # Chuẩn hóa Unicode NFC — điện thoại gửi NFD, regex dùng NFC
+    text = unicodedata.normalize('NFC', text)
     text_lower = text.lower().strip()
     text_original = text.strip()
 
