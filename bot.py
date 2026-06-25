@@ -4,7 +4,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 import telebot
-from telebot.types import Message
+from telebot.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import io
 import openpyxl
 
@@ -13,6 +13,7 @@ from database import add_transaction, get_transactions, add_asset, save_state, l
 from asset_manager import get_asset_summary, liquidate_asset
 from finance_logic import get_balance, get_monthly_summary, get_category_breakdown
 from gsheets_reader import sync_all_from_sheets, read_expenses_from_sheet, read_portfolio_from_sheet
+from gsheets_sync import sync_expense_to_gsheet
 from simulation import run_monte_carlo, generate_projection_chart
 from nav_fetcher import fetch_nav_from_vnsignal, update_asset_nav, refresh_all_assets
 from llm_parser import parse_transaction
@@ -52,9 +53,24 @@ def parse_amount(text):
 
 def ask_bank(uid, amount, cat, desc):
     save_state(uid, {"pending_bank": {"amount": amount, "category": cat, "desc": desc}})
+    markup = InlineKeyboardMarkup(row_width=3)
+    markup.add(*(InlineKeyboardButton(b, callback_data=f"bank:{b}") for b in VALID_BANKS))
     bot.send_message(uid,
-        f"Amount: {amount:+,.0f}\nDesc: {desc}\n"
-        f"Which bank? (VCB / ACB / HDBANK / CASH / MOMO)")
+        f"Amount: {amount:+,.0f}\nDesc: {desc}\nWhich bank?",
+        reply_markup=markup)
+
+def after_tx_sync(uid, amount, cat, desc, bank, tid=None):
+    try:
+        from datetime import date
+        sync_expense_to_gsheet({
+            "date": date.today().isoformat(),
+            "amount": amount,
+            "category": cat,
+            "description": desc,
+            "bank_account": bank or "",
+        })
+    except Exception as e:
+        logger.warning(f"GSheet sync error: {e}")
 
 @bot.message_handler(commands=["start"])
 def cmd_start(message: Message):
@@ -423,6 +439,58 @@ def cmd_navtest(message: Message):
         return
     bot.edit_message_text(f"✅ {ticker}: `{nav:,.0f}` ({dt})", msg.chat.id, msg.message_id, parse_mode="Markdown")
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("bank:"))
+def handle_bank_callback(call: CallbackQuery):
+    uid = call.from_user.id
+    if not is_admin(uid):
+        bot.answer_callback_query(call.id, "Access denied.")
+        return
+    bank = call.data.split(":", 1)[1]
+    loaded = load_state(uid)
+    if "pending_bank" not in loaded:
+        bot.answer_callback_query(call.id, "Hết phiên, gửi lại giao dịch nhé.")
+        bot.edit_message_text("Session expired. Send again.", uid, call.message.message_id)
+        return
+    state = loaded["pending_bank"]
+    tid = add_transaction(uid, state["amount"], state["category"], state["desc"],
+                          is_asset=0, bank_account=bank)
+    clear_state(uid)
+    bal = get_balance()
+    text = f"✅ Recorded: {state['amount']:+,.0f} - {state['desc']} ({bank})\nBalance: {bal:,.0f}"
+    after_tx_sync(uid, state["amount"], state["category"], state["desc"], bank, tid)
+    if state["amount"] < -199:
+        save_state(uid, {"pending_capitalize_decision": {"tid": tid, "value": abs(state["amount"])}})
+        markup = InlineKeyboardMarkup()
+        markup.row(
+            InlineKeyboardButton("Yes", callback_data="cap:yes"),
+            InlineKeyboardButton("No", callback_data="cap:no"),
+        )
+        bot.edit_message_text(text + "\n\nCapitalize as asset?", uid, call.message.message_id, reply_markup=markup)
+    else:
+        bot.edit_message_text(text, uid, call.message.message_id)
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("cap:"))
+def handle_cap_callback(call: CallbackQuery):
+    uid = call.from_user.id
+    if not is_admin(uid):
+        bot.answer_callback_query(call.id, "Access denied.")
+        return
+    choice = call.data.split(":", 1)[1]
+    loaded = load_state(uid)
+    key = "pending_capitalize_decision"
+    if key not in loaded:
+        bot.answer_callback_query(call.id, "Hết phiên.")
+        return
+    state = loaded[key]
+    if choice == "yes":
+        save_state(uid, {"pending_capitalize": {"tid": state["tid"], "value": state["value"], "step": "ask_name"}})
+        bot.edit_message_text("What is the asset name? (e.g. MacBook Pro 14)", uid, call.message.message_id)
+    else:
+        clear_state(uid)
+        bot.edit_message_text("Saved as regular expense.", uid, call.message.message_id)
+    bot.answer_callback_query(call.id)
+
 @bot.message_handler(func=lambda m: True)
 def handle_main_message(message: Message):
     if not is_admin(message.from_user.id):
@@ -444,14 +512,16 @@ def handle_main_message(message: Message):
                               is_asset=0, bank_account=bank)
         clear_state(uid)
         bal = get_balance()
+        text_reply = f"✅ Recorded: {state['amount']:+,.0f} - {state['desc']} ({bank})\nBalance: {bal:,.0f}"
+        after_tx_sync(uid, state["amount"], state["category"], state["desc"], bank, tid)
         if state["amount"] < -199:
             save_state(uid, {"pending_capitalize_decision": {"tid": tid, "value": abs(state["amount"])}})
-            bot.send_message(uid,
-                f"✅ Recorded: {state['amount']:+,.0f} - {state['desc']} ({bank})\n"
-                f"Balance: {bal:,.0f}\n\n"
-                f"Capitalize as asset? (yes/no)")
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("Yes", callback_data="cap:yes"),
+                       InlineKeyboardButton("No", callback_data="cap:no"))
+            bot.send_message(uid, text_reply + "\n\nCapitalize as asset?", reply_markup=markup)
         else:
-            bot.send_message(uid, f"✅ Recorded: {state['amount']:+,.0f} - {state['desc']} ({bank})\nBalance: {bal:,.0f}")
+            bot.send_message(uid, text_reply)
         return
 
     # --- State: pending_capitalize_decision (user typing yes/no) ---
@@ -508,21 +578,25 @@ def handle_main_message(message: Message):
     if action == "transfer" and from_bank and to_bank:
         add_transaction(uid, -abs(amount), "transfer", desc, is_asset=0, bank_account=from_bank)
         add_transaction(uid, abs(amount), "transfer", desc, is_asset=0, bank_account=to_bank)
+        after_tx_sync(uid, -abs(amount), "transfer", desc, from_bank)
+        after_tx_sync(uid, abs(amount), "transfer", desc, to_bank)
         bot.reply_to(message, f"✅ Transferred {abs(amount):,.0f} from {from_bank} to {to_bank}.")
         return
 
     # --- INCOME / EXPENSE with bank ---
     if bank:
         tid = add_transaction(uid, amount, cat, desc, is_asset=0, bank_account=bank)
+        after_tx_sync(uid, amount, cat, desc, bank, tid)
         bal = get_balance()
+        text_reply = f"✅ Recorded: {amount:+,.0f} - {desc} ({bank})\nBalance: {bal:,.0f}"
         if amount < -199:
             save_state(uid, {"pending_capitalize_decision": {"tid": tid, "value": abs(amount)}})
-            bot.reply_to(message,
-                f"✅ Recorded: {amount:+,.0f} - {desc} ({bank})\n"
-                f"Balance: {bal:,.0f}\n\n"
-                f"Capitalize as asset? (yes/no)")
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("Yes", callback_data="cap:yes"),
+                       InlineKeyboardButton("No", callback_data="cap:no"))
+            bot.reply_to(message, text_reply + "\n\nCapitalize as asset?", reply_markup=markup)
         else:
-            bot.reply_to(message, f"✅ Recorded: {amount:+,.0f} - {desc} ({bank})\nBalance: {bal:,.0f}")
+            bot.reply_to(message, text_reply)
         return
 
     # --- No bank yet -> ask ---
