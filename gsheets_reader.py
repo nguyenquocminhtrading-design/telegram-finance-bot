@@ -11,6 +11,19 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive'
 ]
 
+
+def parse_sheet_amount(value):
+    """Parse số tiền từ Sheets, chịu được 1.556.055 và 1,556,055."""
+    if value is None:
+        return 0.0
+    text = str(value).strip()
+    if not text:
+        return 0.0
+    text = text.replace(" ", "").replace(".", "").replace(",", "")
+    if text in ("-", "+"):
+        return 0.0
+    return float(text)
+
 def get_gspread_client():
     if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
         return None, f"File '{GOOGLE_CREDENTIALS_FILE}' not found."
@@ -227,5 +240,142 @@ def sync_all_from_sheets(user_id=0):
 
 def full_sync_from_sheets(user_id=0):
     """Xóa dữ liệu SQLite của user rồi import lại toàn bộ từ Google Sheets."""
+    clear_all_finance_data(user_id)
+    return sync_all_from_sheets(user_id)
+
+
+# Override parsers at the end of the file so they win even if older
+# definitions above were written with a narrower number format.
+def parse_sheet_amount(value):
+    if value is None:
+        return 0.0
+    text = str(value).strip()
+    if not text:
+        return 0.0
+    text = text.replace(" ", "").replace(".", "").replace(",", "")
+    if text in ("-", "+"):
+        return 0.0
+    return float(text)
+
+
+def sync_expenses_to_sqlite(data, user_id=0):
+    imported = 0
+    skipped = 0
+    conn = get_db()
+    existing = set()
+    for r in conn.execute(
+        "SELECT description, amount, transaction_date FROM transactions WHERE user_id = ?",
+        (user_id,),
+    ).fetchall():
+        existing.add((r["description"], r["amount"], r["transaction_date"]))
+    conn.close()
+
+    for row in data:
+        try:
+            desc = row.get("Description", "").strip()
+            amount = parse_sheet_amount(row.get("Amount", "0"))
+            txn_date = row.get("Date", date.today().isoformat())
+            cat = row.get("Category", "other").strip().lower()
+            bank = row.get("Bank Account", "").strip()
+            if (desc, amount, txn_date) in existing:
+                skipped += 1
+                continue
+            add_transaction(user_id, amount, cat, desc, txn_date, is_asset=0, bank_account=bank)
+            imported += 1
+        except (ValueError, KeyError):
+            skipped += 1
+    return imported, skipped
+
+
+def sync_portfolio_to_sqlite(data, user_id=0):
+    imported = 0
+    skipped = 0
+    conn = get_db()
+    existing_assets = set()
+    for r in conn.execute(
+        "SELECT name, original_value FROM assets WHERE user_id = ?",
+        (user_id,),
+    ).fetchall():
+        existing_assets.add((r["name"], r["original_value"]))
+    conn.close()
+
+    for row in data:
+        try:
+            name = row.get("TÃ i sáº£n", "").strip()
+            value = parse_sheet_amount(row.get("GiÃ¡ trá»‹", "0"))
+            trans_type = row.get("Loáº¡i GD", "").strip().lower()
+            if not name or value <= 0:
+                skipped += 1
+                continue
+            if (name, value) in existing_assets:
+                skipped += 1
+                continue
+            if trans_type in ("mua", "buy"):
+                tid = add_transaction(user_id, -value, "investment", f"Buy {name}", is_asset=1)
+                add_asset(user_id, tid, name, value, 12)
+                imported += 1
+        except (ValueError, KeyError):
+            skipped += 1
+    return imported, skipped
+
+
+def sync_transfers_to_sqlite(data, user_id=0):
+    imported = 0
+    skipped = 0
+    for row in data:
+        try:
+            txn_date = row.get("Date", date.today().isoformat())
+            amount = abs(parse_sheet_amount(row.get("Amount", "0")))
+            from_bank = row.get("From", "").strip().upper()
+            to_bank = row.get("To", "").strip().upper()
+            desc = row.get("Description", "").strip()
+            if not amount or not from_bank or not to_bank or not desc:
+                skipped += 1
+                continue
+            if _transfer_exists(user_id, txn_date, amount, from_bank, to_bank, desc):
+                skipped += 1
+                continue
+            add_transfer(user_id, amount, from_bank, to_bank, desc, txn_date)
+            imported += 1
+        except (ValueError, KeyError, AttributeError):
+            skipped += 1
+    return imported, skipped
+
+
+def sync_all_from_sheets(user_id=0):
+    results = {
+        "expenses": {"imported": 0, "skipped": 0, "error": None},
+        "transfers": {"imported": 0, "skipped": 0, "error": None},
+        "portfolio": {"imported": 0, "skipped": 0, "error": None},
+    }
+
+    exp_data, err = read_expenses_from_sheet()
+    if err:
+        results["expenses"]["error"] = err
+    elif exp_data is not None:
+        imp, skip = sync_expenses_to_sqlite(exp_data, user_id)
+        results["expenses"]["imported"] = imp
+        results["expenses"]["skipped"] = skip
+
+    transfer_data, err = read_transfers_from_sheet()
+    if err:
+        results["transfers"]["error"] = err
+    elif transfer_data is not None:
+        imp, skip = sync_transfers_to_sqlite(transfer_data, user_id)
+        results["transfers"]["imported"] = imp
+        results["transfers"]["skipped"] = skip
+
+    port_data, err = read_portfolio_from_sheet()
+    if err:
+        results["portfolio"]["error"] = err
+    elif port_data is not None:
+        imp, skip = sync_portfolio_to_sqlite(port_data, user_id)
+        results["portfolio"]["imported"] = imp
+        results["portfolio"]["skipped"] = skip
+
+    return results
+
+
+def full_sync_from_sheets(user_id=0):
     clear_all_finance_data(user_id)
     return sync_all_from_sheets(user_id)
