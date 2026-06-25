@@ -79,6 +79,34 @@ def ask_bank(uid, amount, cat, desc):
         f"Amount: {amount:+,.0f}\nDesc: {desc}\nWhich bank?",
         reply_markup=markup)
 
+def ask_transfer_from(uid, amount):
+    """Ask user: which bank to transfer FROM (inline keyboard)"""
+    save_state(uid, {"pending_transfer_pick": {"amount": amount, "step": "from"}})
+    markup = InlineKeyboardMarkup(row_width=3)
+    markup.add(*(InlineKeyboardButton(b, callback_data=f"trfrom:{b}") for b in VALID_BANKS))
+    bot.send_message(uid,
+        f"💸 Chuyển: {abs(amount):,.0f} VND\nTừ tài khoản nào?",
+        reply_markup=markup)
+
+def ask_transfer_to(uid, amount, from_bank):
+    """Ask user: which bank to transfer TO (inline keyboard)"""
+    save_state(uid, {"pending_transfer_pick": {"amount": amount, "step": "to", "from_bank": from_bank}})
+    others = [b for b in VALID_BANKS if b != from_bank]
+    markup = InlineKeyboardMarkup(row_width=3)
+    markup.add(*(InlineKeyboardButton(b, callback_data=f"trto:{b}") for b in others))
+    bot.send_message(uid,
+        f"💸 Chuyển: {abs(amount):,.0f} VND\nTừ: {from_bank}\nSang tài khoản nào?",
+        reply_markup=markup)
+
+def do_transfer(uid, amount, desc, from_bank, to_bank):
+    """Execute a transfer between two banks, returns confirmation text"""
+    from database import add_transaction as _add_tx
+    _add_tx(uid, -abs(amount), "transfer", desc, is_asset=0, bank_account=from_bank)
+    _add_tx(uid, abs(amount), "transfer", desc, is_asset=0, bank_account=to_bank)
+    after_tx_sync(uid, -abs(amount), "transfer", desc, from_bank)
+    after_tx_sync(uid, abs(amount), "transfer", desc, to_bank)
+    return f"✅ Chuyển {abs(amount):,.0f} VND\n{from_bank} → {to_bank}"
+
 def after_tx_sync(uid, amount, cat, desc, bank, tid=None):
     try:
         from datetime import date
@@ -530,6 +558,57 @@ def handle_cap_callback(call: CallbackQuery):
         logger.error(f"cap_callback error: {e}")
         safe_send(uid, f"Error: {e}")
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("trfrom:"))
+def handle_trfrom_callback(call: CallbackQuery):
+    """User picked FROM bank for transfer → now ask TO bank"""
+    uid = call.from_user.id
+    if not is_admin(uid):
+        safe_answer(call.id, "Access denied.")
+        return
+    safe_answer(call.id)
+    from_bank = call.data.split(":", 1)[1]
+    loaded = load_state(uid)
+    state = loaded.get("pending_transfer_pick", {})
+    if not state:
+        safe_edit("⚠️ Session expired. Please send again.", uid, call.message.message_id, reply_markup=None)
+        return
+    amount = state.get("amount", 0)
+    # Update state: now pick destination
+    save_state(uid, {"pending_transfer_pick": {"amount": amount, "step": "to", "from_bank": from_bank}})
+    # Replace keyboard with "to bank" options (exclude selected source)
+    others = [b for b in VALID_BANKS if b != from_bank]
+    markup = InlineKeyboardMarkup(row_width=3)
+    markup.add(*(InlineKeyboardButton(b, callback_data=f"trto:{b}") for b in others))
+    safe_edit(
+        f"💸 Chuyển: {abs(amount):,.0f} VND\nTừ: {from_bank}\nSang tài khoản nào?",
+        uid, call.message.message_id, reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("trto:"))
+def handle_trto_callback(call: CallbackQuery):
+    """User picked TO bank → execute transfer"""
+    uid = call.from_user.id
+    if not is_admin(uid):
+        safe_answer(call.id, "Access denied.")
+        return
+    safe_answer(call.id)
+    to_bank = call.data.split(":", 1)[1]
+    loaded = load_state(uid)
+    state = loaded.get("pending_transfer_pick", {})
+    if not state or "from_bank" not in state:
+        safe_edit("⚠️ Session expired. Please send again.", uid, call.message.message_id, reply_markup=None)
+        return
+    amount = state["amount"]
+    from_bank = state["from_bank"]
+    clear_state(uid)
+    try:
+        desc = f"Chuyển từ {from_bank} sang {to_bank}"
+        reply = do_transfer(uid, amount, desc, from_bank, to_bank)
+        safe_edit(reply, uid, call.message.message_id, reply_markup=None)
+    except Exception as e:
+        logger.error(f"trto_callback error: {e}")
+        safe_edit(f"❌ Error: {e}", uid, call.message.message_id, reply_markup=None)
+
 @bot.message_handler(func=lambda m: True)
 def handle_main_message(message: Message):
     if not is_admin(message.from_user.id):
@@ -614,12 +693,17 @@ def handle_main_message(message: Message):
     logger.info(f"[{source}] {text} -> action={action} amount={amount} cat={cat} bank={bank}")
 
     # --- TRANSFER ---
-    if action == "transfer" and from_bank and to_bank:
-        add_transaction(uid, -abs(amount), "transfer", desc, is_asset=0, bank_account=from_bank)
-        add_transaction(uid, abs(amount), "transfer", desc, is_asset=0, bank_account=to_bank)
-        after_tx_sync(uid, -abs(amount), "transfer", desc, from_bank)
-        after_tx_sync(uid, abs(amount), "transfer", desc, to_bank)
-        bot.reply_to(message, f"✅ Transferred {abs(amount):,.0f} from {from_bank} to {to_bank}.")
+    if action == "transfer":
+        if from_bank and to_bank:
+            # Both known → execute immediately
+            reply = do_transfer(uid, amount, desc, from_bank, to_bank)
+            bot.reply_to(message, reply)
+        elif from_bank and not to_bank:
+            # Know source, ask destination via keyboard
+            ask_transfer_to(uid, amount, from_bank)
+        else:
+            # Neither or only to_bank known → ask from scratch
+            ask_transfer_from(uid, amount)
         return
 
     # --- INCOME / EXPENSE with bank ---
@@ -631,8 +715,8 @@ def handle_main_message(message: Message):
         if amount < -199:
             save_state(uid, {"pending_capitalize_decision": {"tid": tid, "value": abs(amount)}})
             markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("Yes", callback_data="cap:yes"),
-                       InlineKeyboardButton("No", callback_data="cap:no"))
+            markup.row(InlineKeyboardButton("✅ Yes", callback_data="cap:yes"),
+                       InlineKeyboardButton("❌ No", callback_data="cap:no"))
             bot.reply_to(message, text_reply + "\n\nCapitalize as asset?", reply_markup=markup)
         else:
             bot.reply_to(message, text_reply)
