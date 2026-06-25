@@ -22,7 +22,30 @@ from telebot.formatting import escape_markdown
 
 logger = logging.getLogger(__name__)
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
+class SafeBot:
+    def __init__(self, raw_bot, timeout=8):
+        self._b = raw_bot
+        self._timeout = timeout
+        self._methods = {"reply_to", "send_message", "send_photo", "send_document",
+                         "edit_message_text", "edit_message_reply_markup",
+                         "answer_callback_query", "send_animation"}
+
+    def __getattr__(self, name):
+        attr = getattr(self._b, name)
+        if name in self._methods:
+            def wrap(*a, **kw):
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    f = pool.submit(attr, *a, **kw)
+                    try:
+                        return f.result(timeout=self._timeout)
+                    except Exception as e:
+                        logger.error(f"[SafeBot] {name}: {e}")
+                        return None
+            return wrap
+        return attr
+
+raw_bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
+bot = SafeBot(raw_bot)
 
 VALID_BANKS = ["VCB", "ACB", "HDBANK", "CASH", "MOMO"]
 
