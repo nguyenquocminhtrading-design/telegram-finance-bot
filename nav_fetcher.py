@@ -2,7 +2,7 @@ import re
 import sqlite3
 import requests
 import logging
-from database import get_assets, update_asset_value, get_db
+from database import get_assets, update_asset_value, get_db, get_asset_by_id
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ def fetch_nav_from_vnsignal(ticker):
     if not url:
         return None, None, f"Không hỗ trợ ticker '{ticker}'"
     try:
-        resp = requests.get(url, timeout=15)
+        resp = requests.get(url, timeout=5)
         resp.raise_for_status()
         text = resp.text
         match = re.search(r'NAV Gần Nhất\s*([\d.]+)\s*VND\s*([\d]+/[\d]+/[\d]+)', text)
@@ -36,9 +36,31 @@ def fetch_nav_from_vnsignal(ticker):
             return nav_value, None, None
         return None, None, "Không tìm thấy NAV trong trang VNSignal"
     except requests.RequestException as e:
-        return None, None, f"Lỗi kết nối VNSignal: {e}"
-    except Exception as e:
-        return None, None, f"Lỗi parse NAV: {e}"
+        return None, None, f"Lỗi VNSignal: {e}"
+
+def fetch_nav_cached(ticker):
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT last_nav, last_nav_date FROM assets WHERE ticker = ? AND last_nav IS NOT NULL LIMIT 1",
+            (ticker.upper(),)
+        ).fetchone()
+        conn.close()
+        if row:
+            return row["last_nav"], row["last_nav_date"], None
+    except Exception:
+        conn.close()
+    return None, None, f"No cached NAV for {ticker}"
+
+def fetch_nav(ticker, asset_id=None):
+    nav, nav_date, err = fetch_nav_from_vnsignal(ticker)
+    if nav is not None:
+        return nav, nav_date, None
+    cached, cached_date, _ = fetch_nav_cached(ticker)
+    if cached is not None:
+        logger.warning(f"VNSignal fail for {ticker}, using cached NAV {cached}")
+        return cached, cached_date, f"Using cached NAV ({err})"
+    return None, None, err
 
 def update_asset_nav(asset_id, ticker=None):
     asset = None
@@ -51,11 +73,12 @@ def update_asset_nav(asset_id, ticker=None):
     t = ticker or asset.get("ticker", "")
     if not t:
         return False, "Tài sản chưa có ticker"
-    nav, nav_date, err = fetch_nav_from_vnsignal(t)
-    if err:
-        return False, err
+    nav, nav_date, err = fetch_nav(t, asset_id)
     if nav is None:
-        return False, "Không lấy được NAV"
+        cached = asset.get("last_nav")
+        if cached:
+            return True, {"nav": cached, "date": asset.get("last_nav_date"), "new_value": asset["current_value"], "name": asset["name"], "cached": True}
+        return False, err
     quantity = asset["original_value"] / 100000
     new_value = round(nav * quantity, 2)
     update_asset_value(asset_id, new_value)
@@ -67,7 +90,7 @@ def update_asset_nav(asset_id, ticker=None):
         pass
     conn.commit()
     conn.close()
-    return True, {"nav": nav, "date": nav_date, "new_value": new_value, "name": asset["name"]}
+    return True, {"nav": nav, "date": nav_date, "new_value": new_value, "name": asset["name"], "cached": False}
 
 def refresh_all_assets():
     results = []

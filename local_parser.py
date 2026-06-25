@@ -93,7 +93,7 @@ def resolve_bank(text):
 
 def parse_amount_local(text):
     for pattern, func in AMOUNT_PATTERNS:
-        m = pattern.search(text)
+        m = re.search(pattern, text)
         if m:
             return func(m)
     return None

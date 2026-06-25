@@ -17,6 +17,7 @@ from simulation import run_monte_carlo, generate_projection_chart
 from nav_fetcher import fetch_nav_from_vnsignal, update_asset_nav, refresh_all_assets
 from llm_parser import parse_transaction
 from local_parser import parse_transaction_local
+from telebot.formatting import escape_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -386,7 +387,7 @@ def cmd_envcheck(message: Message):
         f"  GEMINI_API_KEY: {mask(GEMINI_API_KEY)}",
         f"  GOOGLE_CREDENTIALS: {os.path.exists(GOOGLE_CREDENTIALS_FILE)}",
     ]
-    bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
+    bot.reply_to(message, "\n".join(escape_markdown(l) for l in lines), parse_mode="Markdown")
 
 @bot.message_handler(commands=["logs"])
 def cmd_logs(message: Message):
