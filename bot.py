@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
@@ -22,30 +23,7 @@ from telebot.formatting import escape_markdown
 
 logger = logging.getLogger(__name__)
 
-class SafeBot:
-    def __init__(self, raw_bot, timeout=8):
-        self._b = raw_bot
-        self._timeout = timeout
-        self._methods = {"reply_to", "send_message", "send_photo", "send_document",
-                         "edit_message_text", "edit_message_reply_markup",
-                         "answer_callback_query", "send_animation"}
-
-    def __getattr__(self, name):
-        attr = getattr(self._b, name)
-        if name in self._methods:
-            def wrap(*a, **kw):
-                with ThreadPoolExecutor(max_workers=1) as pool:
-                    f = pool.submit(attr, *a, **kw)
-                    try:
-                        return f.result(timeout=self._timeout)
-                    except Exception as e:
-                        logger.error(f"[SafeBot] {name}: {e}")
-                        return None
-            return wrap
-        return attr
-
-raw_bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
-bot = SafeBot(raw_bot)
+bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 
 VALID_BANKS = ["VCB", "ACB", "HDBANK", "CASH", "MOMO"]
 
@@ -59,8 +37,27 @@ def with_timeout(timeout_secs=8):
                 except FutureTimeout:
                     logger.error(f"TIMEOUT {timeout_secs}s: {func.__name__}")
                     return None
+                except Exception as e:
+                    logger.warning(f"{func.__name__} error: {e}")
+                    return None
         return wrapper
     return decorator
+
+def safe_api(func):
+    wrapped = with_timeout(5)(func)
+    def wrapper(*args, **kwargs):
+        for attempt in range(2):
+            result = wrapped(*args, **kwargs)
+            if result is not None:
+                return result
+            time.sleep(0.5)
+        return None
+    return wrapper
+
+safe_send = safe_api(bot.send_message)
+safe_edit = safe_api(bot.edit_message_text)
+safe_answer = safe_api(bot.answer_callback_query)
+safe_reply = safe_api(bot.reply_to)
 
 def is_admin(user_id):
     return ADMIN_USER_ID == 0 or user_id == ADMIN_USER_ID
@@ -466,13 +463,13 @@ def cmd_navtest(message: Message):
 def handle_bank_callback(call: CallbackQuery):
     uid = call.from_user.id
     if not is_admin(uid):
-        bot.answer_callback_query(call.id, "Access denied.")
+        safe_answer(call.id, "Access denied.")
         return
-    bot.answer_callback_query(call.id)
+    safe_answer(call.id)
     bank = call.data.split(":", 1)[1]
     loaded = load_state(uid)
     if "pending_bank" not in loaded:
-        bot.send_message(uid, "Session expired. Send again.")
+        safe_send(uid, "Session expired. Send again.")
         return
     state = loaded["pending_bank"]
     try:
@@ -487,37 +484,37 @@ def handle_bank_callback(call: CallbackQuery):
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("Yes", callback_data="cap:yes"),
                        InlineKeyboardButton("No", callback_data="cap:no"))
-            bot.edit_message_text(text + "\n\nCapitalize as asset?", uid, call.message.message_id, reply_markup=markup)
+            safe_edit(text + "\n\nCapitalize as asset?", uid, call.message.message_id, reply_markup=markup)
         else:
-            bot.send_message(uid, text)
+            safe_send(uid, text)
     except Exception as e:
         logger.error(f"bank_callback error: {e}")
-        bot.send_message(uid, f"Error: {e}")
+        safe_send(uid, f"Error: {e}")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cap:"))
 def handle_cap_callback(call: CallbackQuery):
     uid = call.from_user.id
     if not is_admin(uid):
-        bot.answer_callback_query(call.id, "Access denied.")
+        safe_answer(call.id, "Access denied.")
         return
-    bot.answer_callback_query(call.id)
+    safe_answer(call.id)
     choice = call.data.split(":", 1)[1]
     loaded = load_state(uid)
     key = "pending_capitalize_decision"
     if key not in loaded:
-        bot.send_message(uid, "Session expired.")
+        safe_send(uid, "Session expired.")
         return
     state = loaded[key]
     try:
         if choice == "yes":
             save_state(uid, {"pending_capitalize": {"tid": state["tid"], "value": state["value"], "step": "ask_name"}})
-            bot.send_message(uid, "What is the asset name? (e.g. MacBook Pro 14)")
+            safe_send(uid, "What is the asset name? (e.g. MacBook Pro 14)")
         else:
             clear_state(uid)
-            bot.send_message(uid, "Saved as regular expense.")
+            safe_send(uid, "Saved as regular expense.")
     except Exception as e:
         logger.error(f"cap_callback error: {e}")
-        bot.send_message(uid, f"Error: {e}")
+        safe_send(uid, f"Error: {e}")
 
 @bot.message_handler(func=lambda m: True)
 def handle_main_message(message: Message):
