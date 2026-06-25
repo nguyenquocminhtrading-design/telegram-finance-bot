@@ -7,3 +7,8 @@ env/
 .idea/
 .vscode/
 *.json
+bot.log
+*.log
+instance/
+*.backup.db
+*.xlsx

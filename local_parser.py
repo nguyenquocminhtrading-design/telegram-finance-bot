@@ -170,7 +170,7 @@ def parse_transaction_local(text):
     # 6. Clean description: remove amount, bank words
     desc = text_original
     for pat, _ in AMOUNT_PATTERNS:
-        desc = pat.sub('', desc)
+        desc = re.sub(pat, '', desc)
     for bank_keywords in BANK_KEYWORDS.values():
         for kw in bank_keywords:
             desc = re.sub(re.escape(kw), '', desc, flags=re.IGNORECASE)
