@@ -468,30 +468,31 @@ def handle_bank_callback(call: CallbackQuery):
     if not is_admin(uid):
         bot.answer_callback_query(call.id, "Access denied.")
         return
+    bot.answer_callback_query(call.id)
     bank = call.data.split(":", 1)[1]
     loaded = load_state(uid)
     if "pending_bank" not in loaded:
-        bot.answer_callback_query(call.id, "Hết phiên, gửi lại giao dịch nhé.")
-        bot.edit_message_text("Session expired. Send again.", uid, call.message.message_id)
+        bot.send_message(uid, "Session expired. Send again.")
         return
     state = loaded["pending_bank"]
-    tid = add_transaction(uid, state["amount"], state["category"], state["desc"],
-                          is_asset=0, bank_account=bank)
-    clear_state(uid)
-    bal = get_balance()
-    text = f"✅ Recorded: {state['amount']:+,.0f} - {state['desc']} ({bank})\nBalance: {bal:,.0f}"
-    after_tx_sync(uid, state["amount"], state["category"], state["desc"], bank, tid)
-    if state["amount"] < -199:
-        save_state(uid, {"pending_capitalize_decision": {"tid": tid, "value": abs(state["amount"])}})
-        markup = InlineKeyboardMarkup()
-        markup.row(
-            InlineKeyboardButton("Yes", callback_data="cap:yes"),
-            InlineKeyboardButton("No", callback_data="cap:no"),
-        )
-        bot.edit_message_text(text + "\n\nCapitalize as asset?", uid, call.message.message_id, reply_markup=markup)
-    else:
-        bot.edit_message_text(text, uid, call.message.message_id)
-    bot.answer_callback_query(call.id)
+    try:
+        tid = add_transaction(uid, state["amount"], state["category"], state["desc"],
+                              is_asset=0, bank_account=bank)
+        clear_state(uid)
+        bal = get_balance()
+        text = f"✅ Recorded: {state['amount']:+,.0f} - {state['desc']} ({bank})\nBalance: {bal:,.0f}"
+        after_tx_sync(uid, state["amount"], state["category"], state["desc"], bank, tid)
+        if state["amount"] < -199:
+            save_state(uid, {"pending_capitalize_decision": {"tid": tid, "value": abs(state["amount"])}})
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("Yes", callback_data="cap:yes"),
+                       InlineKeyboardButton("No", callback_data="cap:no"))
+            bot.edit_message_text(text + "\n\nCapitalize as asset?", uid, call.message.message_id, reply_markup=markup)
+        else:
+            bot.send_message(uid, text)
+    except Exception as e:
+        logger.error(f"bank_callback error: {e}")
+        bot.send_message(uid, f"Error: {e}")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cap:"))
 def handle_cap_callback(call: CallbackQuery):
@@ -499,20 +500,24 @@ def handle_cap_callback(call: CallbackQuery):
     if not is_admin(uid):
         bot.answer_callback_query(call.id, "Access denied.")
         return
+    bot.answer_callback_query(call.id)
     choice = call.data.split(":", 1)[1]
     loaded = load_state(uid)
     key = "pending_capitalize_decision"
     if key not in loaded:
-        bot.answer_callback_query(call.id, "Hết phiên.")
+        bot.send_message(uid, "Session expired.")
         return
     state = loaded[key]
-    if choice == "yes":
-        save_state(uid, {"pending_capitalize": {"tid": state["tid"], "value": state["value"], "step": "ask_name"}})
-        bot.edit_message_text("What is the asset name? (e.g. MacBook Pro 14)", uid, call.message.message_id)
-    else:
-        clear_state(uid)
-        bot.edit_message_text("Saved as regular expense.", uid, call.message.message_id)
-    bot.answer_callback_query(call.id)
+    try:
+        if choice == "yes":
+            save_state(uid, {"pending_capitalize": {"tid": state["tid"], "value": state["value"], "step": "ask_name"}})
+            bot.send_message(uid, "What is the asset name? (e.g. MacBook Pro 14)")
+        else:
+            clear_state(uid)
+            bot.send_message(uid, "Saved as regular expense.")
+    except Exception as e:
+        logger.error(f"cap_callback error: {e}")
+        bot.send_message(uid, f"Error: {e}")
 
 @bot.message_handler(func=lambda m: True)
 def handle_main_message(message: Message):
