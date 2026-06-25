@@ -469,7 +469,9 @@ def handle_bank_callback(call: CallbackQuery):
     bank = call.data.split(":", 1)[1]
     loaded = load_state(uid)
     if "pending_bank" not in loaded:
-        safe_send(uid, "Session expired. Send again.")
+        # Remove keyboard from the old message so user can't click again
+        safe_edit("⚠️ Session expired. Please send the transaction again.",
+                  uid, call.message.message_id, reply_markup=None)
         return
     state = loaded["pending_bank"]
     try:
@@ -482,11 +484,14 @@ def handle_bank_callback(call: CallbackQuery):
         if state["amount"] < -199:
             save_state(uid, {"pending_capitalize_decision": {"tid": tid, "value": abs(state["amount"])}})
             markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("Yes", callback_data="cap:yes"),
-                       InlineKeyboardButton("No", callback_data="cap:no"))
-            safe_edit(text + "\n\nCapitalize as asset?", uid, call.message.message_id, reply_markup=markup)
+            markup.row(InlineKeyboardButton("✅ Yes", callback_data="cap:yes"),
+                       InlineKeyboardButton("❌ No", callback_data="cap:no"))
+            # Edit original message: replace bank keyboard with capitalize question
+            safe_edit(text + "\n\nCapitalize as asset?",
+                      uid, call.message.message_id, reply_markup=markup)
         else:
-            safe_send(uid, text)
+            # Edit original message: remove keyboard, show confirmation inline
+            safe_edit(text, uid, call.message.message_id, reply_markup=None)
     except Exception as e:
         logger.error(f"bank_callback error: {e}")
         safe_send(uid, f"Error: {e}")
@@ -502,16 +507,25 @@ def handle_cap_callback(call: CallbackQuery):
     loaded = load_state(uid)
     key = "pending_capitalize_decision"
     if key not in loaded:
-        safe_send(uid, "Session expired.")
+        # Remove stale keyboard
+        safe_edit("⚠️ Session expired.", uid, call.message.message_id, reply_markup=None)
         return
     state = loaded[key]
+    # Get the existing message text (without the question) to keep it clean
+    original_text = call.message.text or ""
     try:
         if choice == "yes":
+            clear_state(uid)
             save_state(uid, {"pending_capitalize": {"tid": state["tid"], "value": state["value"], "step": "ask_name"}})
+            # Remove keyboard, update message to show choice, then prompt
+            safe_edit(original_text.split("\n\nCapitalize")[0] + "\n\n📦 Capitalize: Yes",
+                      uid, call.message.message_id, reply_markup=None)
             safe_send(uid, "What is the asset name? (e.g. MacBook Pro 14)")
         else:
             clear_state(uid)
-            safe_send(uid, "Saved as regular expense.")
+            # Remove keyboard, update message to show choice
+            safe_edit(original_text.split("\n\nCapitalize")[0] + "\n\n📝 Saved as regular expense.",
+                      uid, call.message.message_id, reply_markup=None)
     except Exception as e:
         logger.error(f"cap_callback error: {e}")
         safe_send(uid, f"Error: {e}")
