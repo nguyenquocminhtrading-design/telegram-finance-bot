@@ -23,8 +23,8 @@
         <div class="top-header">
             <h1>Dashboard</h1>
             <div class="header-actions">
-                <div class="search-bar">Search placeholder...</div>
-                <a href="/api/export/excel" style="color: var(--primary-blue); font-weight: 500; text-decoration: none;">Export Excel</a>
+                <a class="header-link" href="/snapshot">Mobile Snapshot</a>
+                <a class="header-link" href="/api/export/excel">Export Excel</a>
             </div>
         </div>
 
@@ -66,29 +66,31 @@
                         <h3>Recent Transactions</h3>
                         <a href="/transactions" class="text-muted" style="text-decoration: none;">View All</a>
                     </div>
-                    <table class="tx-table">
-                        <tr>
-                            <th>Transaction Name</th>
-                            <th>Date</th>
-                            <th>Amount</th>
-                            <th>Bank</th>
-                        </tr>
-                        {% for tx in recent_transactions %}
-                        <tr>
-                            <td>
-                                <div>{{ tx.description }}</div>
-                                <div class="text-muted" style="text-transform: capitalize;">{{ tx.category }}</div>
-                            </td>
-                            <td class="text-muted">{{ tx.transaction_date }}</td>
-                            <td class="{% if tx.amount > 0 %}text-green{% else %}text-red{% endif %}">
-                                {{ "{:+,.0f}".format(tx.amount) }}
-                            </td>
-                            <td>
-                                <span class="status-badge status-completed">{{ tx.bank_account if tx.bank_account else 'Cash' }}</span>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </table>
+                    <div class="table-wrap">
+                        <table class="tx-table">
+                            <tr>
+                                <th>Transaction Name</th>
+                                <th>Date</th>
+                                <th>Amount</th>
+                                <th>Bank</th>
+                            </tr>
+                            {% for tx in recent_transactions %}
+                            <tr>
+                                <td>
+                                    <div>{{ tx.description }}</div>
+                                    <div class="text-muted" style="text-transform: capitalize;">{{ tx.category }}</div>
+                                </td>
+                                <td class="text-muted">{{ tx.transaction_date }}</td>
+                                <td class="{% if tx.amount > 0 %}text-green{% else %}text-red{% endif %}">
+                                    {{ "{:+,.0f}".format(tx.amount) }}
+                                </td>
+                                <td>
+                                    <span class="status-badge status-completed">{{ tx.bank_account if tx.bank_account else 'Cash' }}</span>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </table>
+                    </div>
                 </div>
             </div>
 
@@ -107,18 +109,20 @@
                     <div class="chart-header">
                         <h3>Active Plans</h3>
                     </div>
-                    <table class="tx-table">
-                        {% for a in assets.assets %}
-                        {% if a.is_active %}
-                        <tr>
-                            <td>
-                                <div>{{ a.name }}</div>
-                                <div class="text-muted">{{ "{:,.0f}".format(a.current_value) }} / {{ "{:,.0f}".format(a.original_value) }}</div>
-                            </td>
-                        </tr>
-                        {% endif %}
-                        {% endfor %}
-                    </table>
+                    <div class="table-wrap">
+                        <table class="tx-table">
+                            {% for a in assets.assets %}
+                            {% if a.is_active %}
+                            <tr>
+                                <td>
+                                    <div>{{ a.name }}</div>
+                                    <div class="text-muted">{{ "{:,.0f}".format(a.current_value) }} / {{ "{:,.0f}".format(a.original_value) }}</div>
+                                </td>
+                            </tr>
+                            {% endif %}
+                            {% endfor %}
+                        </table>
+                    </div>
                 </div>
                 {% endif %}
             </div>

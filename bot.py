@@ -327,7 +327,15 @@ def cmd_web(message: Message):
     if not is_admin(message.from_user.id):
         return
     base = WEBHOOK_URL.rsplit("/webhook", 1)[0] if "/webhook" in WEBHOOK_URL else WEBHOOK_URL
-    bot.reply_to(message, f"Dashboard: {base}/dashboard")
+    dashboard_url = f"{base}/dashboard"
+    snapshot_url = f"{base}/snapshot"
+    bot.reply_to(
+        message,
+        "🌐 Web links:\n"
+        f"Desktop: {dashboard_url}\n"
+        f"Mobile: {snapshot_url}\n\n"
+        "Mở desktop khi xem trên máy tính, mở mobile snapshot khi dùng điện thoại."
+    )
 
 @bot.message_handler(commands=["nav"])
 def cmd_nav(message: Message):

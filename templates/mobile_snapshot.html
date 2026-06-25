@@ -7,74 +7,125 @@
     <!-- Telegram WebApp SDK -->
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
+        :root {
+            --bg: linear-gradient(180deg, #eef2ff 0%, #f8fafc 48%, #ffffff 100%);
+            --card: rgba(255,255,255,0.92);
+            --text: #111827;
+            --muted: #6b7280;
+            --blue: #1d4ed8;
+            --green: #059669;
+            --red: #dc2626;
+            --border: rgba(15, 23, 42, 0.08);
+        }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-            background-color: var(--tg-theme-bg-color, #f3f4f6);
-            color: var(--tg-theme-text-color, #1f2937);
+            background: var(--tg-theme-bg-color, var(--bg));
+            color: var(--tg-theme-text-color, var(--text));
             margin: 0;
-            padding: 20px;
+            padding: 16px;
+        }
+        .hero {
+            margin-bottom: 14px;
+        }
+        .hero h1 {
+            font-size: 20px;
+            margin: 0 0 4px 0;
+        }
+        .hero p {
+            margin: 0;
+            color: var(--muted);
+            font-size: 13px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 12px;
         }
         .card {
-            background-color: var(--tg-theme-secondary-bg-color, #ffffff);
-            border-radius: 12px;
-            padding: 20px;
-            margin-bottom: 16px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            background-color: var(--tg-theme-secondary-bg-color, var(--card));
+            backdrop-filter: blur(8px);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 18px;
+            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
             text-align: center;
         }
         .card h3 {
             margin: 0 0 10px 0;
             font-size: 14px;
-            color: var(--tg-theme-hint-color, #6b7280);
+            color: var(--tg-theme-hint-color, var(--muted));
             text-transform: uppercase;
+            letter-spacing: 0.08em;
         }
         .card .value {
-            font-size: 28px;
+            font-size: 30px;
             font-weight: 700;
+            line-height: 1.1;
         }
-        .positive { color: #10b981; }
-        .negative { color: #ef4444; }
-        .btn-main {
+        .positive { color: var(--green); }
+        .negative { color: var(--red); }
+        .actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 14px;
+        }
+        .btn-main, .btn-secondary {
             display: block;
             width: 100%;
-            background-color: var(--tg-theme-button-color, #3b82f6);
-            color: var(--tg-theme-button-text-color, #ffffff);
             border: none;
             padding: 14px;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: 600;
+            border-radius: 14px;
+            font-size: 15px;
+            font-weight: 700;
             text-align: center;
             text-decoration: none;
-            margin-top: 10px;
+        }
+        .btn-main {
+            background-color: var(--tg-theme-button-color, var(--blue));
+            color: var(--tg-theme-button-text-color, #ffffff);
+        }
+        .btn-secondary {
+            background: rgba(29, 78, 216, 0.08);
+            color: var(--blue);
         }
     </style>
 </head>
 <body>
-    <div class="card">
-        <h3>Current Balance</h3>
-        <div class="value {% if report.balance < 0 %}negative{% endif %}">
-            {{ "{:,.0f}".format(report.balance) }} VND
+    <div class="hero">
+        <h1>Finance Snapshot</h1>
+        <p>Quick view for mobile. Open desktop dashboard for the full layout.</p>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h3>Current Balance</h3>
+            <div class="value {% if report.balance < 0 %}negative{% endif %}">
+                {{ "{:,.0f}".format(report.balance) }} VND
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Monthly Income</h3>
+            <div class="value positive">+{{ "{:,.0f}".format(report.monthly.income) }}</div>
+        </div>
+
+        <div class="card">
+            <h3>Monthly Expense</h3>
+            <div class="value negative">-{{ "{:,.0f}".format(report.monthly.expense) }}</div>
+        </div>
+
+        <div class="card">
+            <h3>Active Assets</h3>
+            <div class="value" style="color:var(--blue);">{{ assets.active_count }}</div>
+            <p style="font-size:12px; color:var(--muted); margin-top:5px;">Total Value: {{ "{:,.0f}".format(assets.total_current) }} VND</p>
         </div>
     </div>
 
-    <div class="card">
-        <h3>Monthly Income</h3>
-        <div class="value positive">+{{ "{:,.0f}".format(report.monthly.income) }}</div>
+    <div class="actions">
+        <a href="/dashboard" class="btn-main">Open Dashboard</a>
+        <a href="/reports" class="btn-secondary">View Reports</a>
     </div>
-
-    <div class="card">
-        <h3>Monthly Expense</h3>
-        <div class="value negative">-{{ "{:,.0f}".format(report.monthly.expense) }}</div>
-    </div>
-
-    <div class="card">
-        <h3>Active Assets</h3>
-        <div class="value" style="color:#3b82f6;">{{ assets.active_count }}</div>
-        <p style="font-size:12px; color:#6b7280; margin-top:5px;">Total Value: {{ "{:,.0f}".format(assets.total_current) }} VND</p>
-    </div>
-
-    <a href="/dashboard" class="btn-main">Open Full Dashboard</a>
 
     <script>
         // Init Telegram WebApp

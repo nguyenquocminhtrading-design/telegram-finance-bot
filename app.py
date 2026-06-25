@@ -11,7 +11,7 @@ import openpyxl
 import concurrent.futures
 import threading
 
-from config import TELEGRAM_TOKEN, WEBHOOK_URL, SECRET_KEY, DATABASE_PATH
+from config import TELEGRAM_TOKEN, WEBHOOK_URL, SECRET_KEY, DATABASE_PATH, ADMIN_USER_ID
 from database import init_db, get_transactions, get_transaction_by_id
 from database import update_transaction, delete_transaction, count_transactions
 from database import get_assets, get_categories, get_setting, set_setting, get_db
@@ -29,6 +29,8 @@ logging.getLogger().addHandler(console_handler)
 logging.getLogger().setLevel(logging.INFO)
 
 logger = logging.getLogger(__name__)
+
+WEB_USER_ID = ADMIN_USER_ID or 0
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
@@ -50,16 +52,16 @@ def index():
 
 @app.route("/dashboard")
 def dashboard():
-    report = get_full_report()
-    assets = get_asset_summary()
-    recent_transactions = get_transactions(0, limit=5, offset=0)
+    report = get_full_report(WEB_USER_ID)
+    assets = get_asset_summary(WEB_USER_ID)
+    recent_transactions = get_transactions(WEB_USER_ID, limit=5, offset=0)
     return render_template("dashboard.html", report=report, assets=assets, recent_transactions=recent_transactions)
 
 
 @app.route("/snapshot")
 def snapshot():
-    report = get_full_report()
-    assets = get_asset_summary()
+    report = get_full_report(WEB_USER_ID)
+    assets = get_asset_summary(WEB_USER_ID)
     return render_template("mobile_snapshot.html", report=report, assets=assets)
 
 
@@ -71,9 +73,9 @@ def transactions_page():
     start_date = request.args.get("start_date")
     end_date = request.args.get("end_date")
     offset = (page - 1) * per_page
-    txs = get_transactions(0, per_page, offset, category, start_date, end_date)
-    total = count_transactions(0, category, start_date, end_date)
-    cats = get_categories(0)
+    txs = get_transactions(WEB_USER_ID, per_page, offset, category, start_date, end_date)
+    total = count_transactions(WEB_USER_ID, category, start_date, end_date)
+    cats = get_categories(WEB_USER_ID)
     return render_template(
         "transactions.html",
         transactions=txs,
@@ -89,13 +91,13 @@ def transactions_page():
 
 @app.route("/assets")
 def assets_page():
-    summary = get_asset_summary()
+    summary = get_asset_summary(WEB_USER_ID)
     return render_template("assets.html", summary=summary)
 
 
 @app.route("/reports")
 def reports_page():
-    report = get_full_report()
+    report = get_full_report(WEB_USER_ID)
     return render_template("reports.html", report=report)
 
 
@@ -117,8 +119,8 @@ def api_transactions():
     start_date = request.args.get("start_date")
     end_date = request.args.get("end_date")
     offset = (page - 1) * per_page
-    txs = get_transactions(0, per_page, offset, category, start_date, end_date)
-    total = count_transactions(0, category, start_date, end_date)
+    txs = get_transactions(WEB_USER_ID, per_page, offset, category, start_date, end_date)
+    total = count_transactions(WEB_USER_ID, category, start_date, end_date)
     return jsonify({"data": txs, "total": total, "page": page, "per_page": per_page})
 
 
@@ -129,7 +131,7 @@ def api_add_transaction():
         return jsonify({"error": "Invalid JSON"}), 400
     from database import add_transaction
     tid = add_transaction(
-        user_id=0,
+        user_id=WEB_USER_ID,
         amount=data.get("amount", 0),
         category=data.get("category", "other"),
         description=data.get("description", ""),
@@ -166,31 +168,31 @@ def api_delete_transaction(tid):
 
 @app.route("/api/summary")
 def api_summary():
-    report = get_full_report()
+    report = get_full_report(WEB_USER_ID)
     return jsonify(report)
 
 
 @app.route("/api/assets")
 def api_assets():
-    summary = get_asset_summary()
+    summary = get_asset_summary(WEB_USER_ID)
     return jsonify(summary)
 
 
 @app.route("/api/categories")
 def api_categories():
-    cats = get_categories(0)
+    cats = get_categories(WEB_USER_ID)
     return jsonify(cats)
 
 
 @app.route("/api/run-depreciation", methods=["POST"])
 def api_run_depreciation():
-    results = run_monthly_depreciation()
+    results = run_monthly_depreciation(WEB_USER_ID)
     return jsonify({"depreciated": len(results), "details": results})
 
 
 @app.route("/api/export/excel", methods=["GET"])
 def api_export_excel():
-    txs = get_transactions(0, 10000, 0)
+    txs = get_transactions(WEB_USER_ID, 10000, 0)
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Transactions"
