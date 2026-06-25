@@ -110,6 +110,56 @@ def add_transaction(user_id, amount, category, description, transaction_date=Non
     return tid
 
 
+@db_retry()
+def add_transfer(user_id, amount, from_bank, to_bank, description, transaction_date=None):
+    """
+    Ghi 1 lệnh chuyển tiền thành 2 dòng đối ứng trong cùng 1 SQLite transaction (atomic).
+      - from_bank nhận  -abs(amount)  → tài khoản nguồn bị trừ
+      - to_bank   nhận  +abs(amount)  → tài khoản đích được cộng
+    Tổng balance không đổi (net = 0).
+    Trả về (tid_out, tid_in) — rowid của 2 dòng.
+    """
+    if transaction_date is None:
+        transaction_date = date.today().isoformat()
+    conn = get_db()
+    try:
+        cur_out = conn.execute(
+            "INSERT INTO transactions "
+            "(user_id, amount, category, description, transaction_date, is_asset, bank_account) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (user_id, -abs(amount), "transfer", description, transaction_date, 0, from_bank),
+        )
+        tid_out = cur_out.lastrowid
+
+        cur_in = conn.execute(
+            "INSERT INTO transactions "
+            "(user_id, amount, category, description, transaction_date, is_asset, bank_account) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (user_id, +abs(amount), "transfer", description, transaction_date, 0, to_bank),
+        )
+        tid_in = cur_in.lastrowid
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return tid_out, tid_in
+
+
+def get_bank_balance(bank_account, user_id=0):
+    """Trả về tổng số dư hiện tại của 1 tài khoản ngân hàng cụ thể."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) as bal FROM transactions "
+        "WHERE bank_account = ? AND user_id = ?",
+        (bank_account, user_id),
+    ).fetchone()
+    conn.close()
+    return round(row["bal"], 2) if row else 0.0
+
+
 def get_transactions(user_id, limit=100, offset=0, category=None, start_date=None, end_date=None):
     conn = get_db()
     params = [user_id]

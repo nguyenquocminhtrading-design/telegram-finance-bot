@@ -10,11 +10,14 @@ import io
 import openpyxl
 
 from config import TELEGRAM_TOKEN, ADMIN_USER_ID, WEBHOOK_URL, DATABASE_PATH
-from database import add_transaction, get_transactions, add_asset, save_state, load_state, clear_state, get_db
+from database import (
+    add_transaction, add_transfer, get_bank_balance,
+    get_transactions, add_asset, save_state, load_state, clear_state, get_db
+)
 from asset_manager import get_asset_summary, liquidate_asset
 from finance_logic import get_balance, get_monthly_summary, get_category_breakdown
 from gsheets_reader import sync_all_from_sheets, read_expenses_from_sheet, read_portfolio_from_sheet
-from gsheets_sync import sync_expense_to_gsheet
+from gsheets_sync import sync_expense_to_gsheet, sync_transfer_to_gsheet
 from simulation import run_monte_carlo, generate_projection_chart
 from nav_fetcher import fetch_nav_from_vnsignal, update_asset_nav, refresh_all_assets
 from llm_parser import parse_transaction
@@ -99,13 +102,39 @@ def ask_transfer_to(uid, amount, from_bank):
         reply_markup=markup)
 
 def do_transfer(uid, amount, desc, from_bank, to_bank):
-    """Execute a transfer between two banks, returns confirmation text"""
-    from database import add_transaction as _add_tx
-    _add_tx(uid, -abs(amount), "transfer", desc, is_asset=0, bank_account=from_bank)
-    _add_tx(uid, abs(amount), "transfer", desc, is_asset=0, bank_account=to_bank)
-    after_tx_sync(uid, -abs(amount), "transfer", desc, from_bank)
-    after_tx_sync(uid, abs(amount), "transfer", desc, to_bank)
-    return f"✅ Chuyển {abs(amount):,.0f} VND\n{from_bank} → {to_bank}"
+    """
+    Thực thi chuyển tiền giữa 2 tài khoản:
+    1. Ghi 2 dòng đối ứng atomic vào SQLite (from_bank: -amount, to_bank: +amount)
+    2. Ghi 1 dòng duy nhất vào Google Sheets tab 'Transfers' (auto-create nếu chưa có)
+    3. Tính balance mới của 2 tài khoản và trả về confirmation text
+    Tổng balance tổng không đổi (net = 0).
+    """
+    from datetime import date as _date
+    # 1. Ghi atomic vào SQLite
+    add_transfer(uid, amount, from_bank, to_bank, desc)
+
+    # 2. Sync 1 dòng duy nhất vào GSheets tab 'Transfers' (không phải Expenses)
+    try:
+        sync_transfer_to_gsheet({
+            "date": _date.today().isoformat(),
+            "amount": amount,
+            "from_bank": from_bank,
+            "to_bank": to_bank,
+            "description": desc,
+        })
+    except Exception as e:
+        logger.warning(f"GSheet transfer sync error: {e}")
+
+    # 3. Lấy balance mới của 2 tài khoản
+    from_bal = get_bank_balance(from_bank, uid)
+    to_bal   = get_bank_balance(to_bank, uid)
+
+    return (
+        f"\u2705 Chuy\u1ec3n {abs(amount):,.0f} VND\n"
+        f"{from_bank} \u2192 {to_bank}\n\n"
+        f"\U0001f4b3 {from_bank}: {from_bal:+,.0f}\n"
+        f"\U0001f4b3 {to_bank}: {to_bal:+,.0f}"
+    )
 
 def after_tx_sync(uid, amount, cat, desc, bank, tid=None):
     try:

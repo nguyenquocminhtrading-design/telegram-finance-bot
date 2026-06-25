@@ -130,6 +130,26 @@ def setup_depreciation_log_tab(sheet):
     except Exception as e:
         print(f"  ⚠️ Could not setup Depreciation Log tab: {e}")
 
+
+TRANSFER_HEADERS = ["Date", "Amount", "From", "To", "Description"]
+
+def setup_transfers_tab(sheet):
+    """Tạo tab 'Transfers' trong Google Sheet để ghi các lệnh chuyển tiền."""
+    print("\n--- Setup Transfers Tab ---")
+    try:
+        try:
+            ws = sheet.worksheet("Transfers")
+            print("Tab 'Transfers' already exists.")
+        except gspread.exceptions.WorksheetNotFound:
+            ws = sheet.add_worksheet(title="Transfers", rows="1000", cols="6")
+            ws.append_row(TRANSFER_HEADERS, value_input_option="USER_ENTERED", table_range="A1")
+            print("Created tab 'Transfers'.")
+
+        apply_header_formatting(ws, num_cols=5)
+        apply_currency_formatting(ws, "B")   # Amount column
+    except Exception as e:
+        print(f"  ⚠️ Could not setup Transfers tab: {e}")
+
 def setup():
     print("Connecting to Google Cloud...")
     if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
@@ -173,6 +193,8 @@ def setup():
         setup_capitalized_assets_tab(sheet)
         # Depreciation Log tab (in My Expenses)
         setup_depreciation_log_tab(sheet)
+        # Transfers tab (in My Expenses) — also auto-created by gsheets_sync.py
+        setup_transfers_tab(sheet)
 
     except gspread.exceptions.SpreadsheetNotFound:
         print(f"ERROR: Cannot find '{EXPENSE_SHEET_NAME}'. Please create it and share with the Service Account.")

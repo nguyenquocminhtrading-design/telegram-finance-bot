@@ -87,6 +87,61 @@ def sync_expense_to_gsheet(transaction_data):
         return False, msg
 
 
+def sync_transfer_to_gsheet(transfer_data):
+    """
+    Ghi 1 dòng chuyển tiền vào tab 'Transfers' trong EXPENSE_SHEET_NAME.
+    Tab được tự động tạo nếu chưa tồn tại.
+
+    transfer_data: dict với các key:
+        date, amount, from_bank, to_bank, description
+
+    Trả về:
+        (True, None)           — thành công
+        (False, error_message) — thất bại
+    """
+    client, auth_err = get_gspread_client()
+    if not client:
+        return False, auth_err
+
+    try:
+        try:
+            sheet = client.open(EXPENSE_SHEET_NAME)
+        except gspread.exceptions.SpreadsheetNotFound:
+            msg = (
+                f"Không tìm thấy Google Sheet tên '{EXPENSE_SHEET_NAME}'. "
+                f"Hãy tạo sheet này và share quyền Editor cho service account."
+            )
+            print(f"[GSheets] {msg}")
+            return False, msg
+
+        # --- Auto-create tab "Transfers" nếu chưa có ---
+        try:
+            worksheet = sheet.worksheet("Transfers")
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = sheet.add_worksheet(title="Transfers", rows=1000, cols=6)
+            worksheet.append_row(
+                ["Date", "Amount", "From", "To", "Description"],
+                value_input_option="USER_ENTERED",
+            )
+            print("[GSheets] Tab 'Transfers' đã được tạo tự động.")
+
+        row_data = [
+            transfer_data.get("date", date.today().isoformat()),
+            transfer_data.get("amount", 0),
+            transfer_data.get("from_bank", ""),
+            transfer_data.get("to_bank", ""),
+            transfer_data.get("description", ""),
+        ]
+        worksheet.append_row(row_data, value_input_option="USER_ENTERED")
+        print(f"[GSheets] Transfer synced: {transfer_data.get('from_bank')} → {transfer_data.get('to_bank')} {transfer_data.get('amount'):,.0f}")
+        return True, None
+
+    except Exception as e:
+        msg = f"Lỗi ghi vào Google Sheet Transfers: {e}"
+        print(f"[GSheets] {msg}")
+        return False, msg
+
+
 def sync_asset_to_gsheet(asset_data, is_buy=True):
     """
     Ghi một giao dịch tài sản vào Google Sheet portfolio.

@@ -1,611 +1,654 @@
 # Personal Finance Manager — Telegram Bot + Web Dashboard
 
-A full-stack personal finance management system built with Python. Users record income/expenses via a Telegram bot, track depreciable assets, run Monte Carlo portfolio projections, and visualize everything through a Flask web dashboard with Chart.js. Data syncs to Google Sheets as a cloud backup.
+Hệ thống quản lý tài chính cá nhân toàn diện: ghi chép thu/chi qua Telegram, theo dõi tài sản khấu hao, chuyển tiền giữa tài khoản, đồng bộ lên Google Sheets, và hiển thị toàn bộ trên Web Dashboard.
 
 ---
 
-## Architecture Overview
+## Kiến trúc tổng quan (Pipeline)
 
 ```
-Telegram (user) ──> bot.py ──> database.py ──> finance_logic.py ──> templates/ (Jinja2)
-                      │            │                 │                  │
-                      │            │                 │                  └── static/js/chart.js
-                      │            │                 │
-                      │            ├── gsheets_sync.py ──> Google Sheets (cloud backup)
-                      │            ├── excel_sync.py   ──> Local .xlsx/.xlsm (legacy fallback)
-                      │            └── scheduler.py    ──> APScheduler (backup, depreciation)
-                      │
-                      ├── asset_manager.py ──> database.py (depreciation engine)
-                      ├── simulation.py    ──> numpy + matplotlib (Monte Carlo)
-                      └── app.py (Flask)    ──> serves web UI + REST API + webhook
+Người dùng nhắn tin Telegram
+        │
+        ▼
+[Telegram Server] ──POST──▶ /webhook/<token>
+        │                        │
+        │                   app.py (Flask)
+        │                        │ process_new_updates()
+        │                        ▼
+        │                   bot.py (pyTelegramBotAPI)
+        │                   ├── parse_transaction()   ← llm_parser.py (Gemini AI)
+        │                   ├── parse_transaction_local() ← local_parser.py (regex)
+        │                   ├── add_transaction()     ─┐
+        │                   ├── add_transfer()         ├── database.py (SQLite)
+        │                   ├── add_asset()           ─┘
+        │                   ├── sync_expense_to_gsheet()  ─┐
+        │                   ├── sync_transfer_to_gsheet()  ├── gsheets_sync.py
+        │                   └── sync_asset_to_gsheet()    ─┘
+        │
+        ▼
+Người dùng mở trình duyệt → /dashboard
+        │
+   app.py (Flask)
+   ├── finance_logic.py   ← tính balance, report, cash flow
+   ├── asset_manager.py   ← tổng hợp tài sản, khấu hao
+   └── templates/         ← Jinja2 HTML + Chart.js
+        │
+        ▼
+   Web Dashboard (dark UI, responsive)
+
+Background (APScheduler trong app.py):
+   scheduler.py ──▶ daily backup DB
+                ──▶ monthly depreciation (1st of month)
+```
+
+---
+
+## Cấu trúc thư mục
+
+```
+telegram-finance-bot/
+├── app.py                  # Flask app: routes, REST API, webhook handler, scheduler init
+├── bot.py                  # Telegram bot: handlers, parsers, inline keyboards, transfer logic
+├── database.py             # SQLite CRUD: transactions, assets, depreciation, state, settings
+├── finance_logic.py        # Tính toán thuần: balance, monthly summary, cash flow, report
+├── asset_manager.py        # Vòng đời tài sản: khấu hao, thanh lý, tổng hợp
+├── scheduler.py            # APScheduler: backup hàng ngày, khấu hao đầu tháng
+├── simulation.py           # Monte Carlo: GBM projection, vẽ chart matplotlib
+├── local_parser.py         # Parser regex thuần: nhận dạng tiếng Việt, số tiền, bank, transfer
+├── llm_parser.py           # Parser AI: gọi Gemini API, fallback nếu local_parser không hiểu
+├── gsheets_sync.py         # Đồng bộ Google Sheets: Expenses, Transfers, Portfolio tabs
+├── gsheets_reader.py       # Đọc dữ liệu từ Google Sheets về để import vào SQLite
+├── excel_sync.py           # Đồng bộ Excel local: legacy fallback khi không có GSheets
+├── nav_fetcher.py          # Lấy NAV quỹ từ VNSignal API, cập nhật tài sản đầu tư
+├── config.py               # Load .env: token, webhook URL, DB path, admin ID, GSheets keys
+├── setup_gsheets.py        # Script chạy 1 lần: tạo worksheets và headers trong Google Sheets
+├── read_excel_temp.py      # Debug script: in cấu trúc file Excel ra console
+├── requirements.txt        # Danh sách pip dependencies
+├── .env                    # Biến môi trường runtime (gitignored)
+├── .env.example            # Template .env cho người dùng mới
+├── .gitignore              # Ignore .env, __pycache__, venv/, credential JSON
+├── deploy.bat / deploy.sh  # Script auto deploy lên GitHub
+├── PYTHONANYWHERE_SETUP.md # Hướng dẫn deploy lên PythonAnywhere step-by-step
+├── instance/
+│   └── finance.db          # SQLite database (tự tạo khi chạy lần đầu)
+├── static/
+│   ├── css/style.css       # Dark blue theme, sidebar layout, responsive
+│   └── js/chart.js         # Chart.js: doughnut (categories) + bar (cash flow)
+└── templates/
+    ├── dashboard.html      # Overview: balance, cash flow, transactions gần nhất, donut
+    ├── transactions.html   # Bảng đầy đủ: filter, pagination, CRUD modal (no reload)
+    ├── assets.html         # Danh mục tài sản: progress bar khấu hao, status badge
+    ├── reports.html        # Báo cáo: 4 charts + bảng tháng
+    ├── settings.html       # Cài đặt hệ thống, trigger khấu hao, export
+    └── mobile_snapshot.html# Telegram Mini App: giao diện mobile compact
+```
+
+---
+
+## Mô tả từng file
+
+### `config.py`
+Load biến môi trường từ `.env` qua `python-dotenv`. Export các hằng số:
+- `TELEGRAM_TOKEN` — Bot token từ BotFather
+- `WEBHOOK_URL` — URL public để Telegram POST update vào
+- `DATABASE_PATH` — Đường dẫn SQLite (mặc định `instance/finance.db`)
+- `SECRET_KEY` — Flask session key
+- `ADMIN_USER_ID` — Telegram user ID được phép dùng bot (0 = cho phép tất cả)
+- `GEMINI_API_KEY` — Key Gemini AI cho LLM parser
+- `GOOGLE_CREDENTIALS_FILE` — Đường dẫn service account JSON
+- `EXPENSE_SHEET_NAME` / `PORTFOLIO_SHEET_NAME` — Tên Google Sheet
+
+---
+
+### `database.py`
+Toàn bộ SQLite layer. Schema 4 bảng:
+
+| Bảng | Mô tả |
+|------|-------|
+| `transactions` | Mọi giao dịch thu/chi/chuyển tiền. Cột quan trọng: `amount` (dương=vào, âm=ra), `category`, `bank_account`, `is_asset` |
+| `assets` | Tài sản vốn hóa. Cột: `name`, `original_value`, `current_value`, `depreciation_months`, `is_active`, `ticker`, `last_nav` |
+| `depreciation_log` | Lịch sử khấu hao hàng tháng mỗi tài sản |
+| `settings` | Key-value store: dùng để lưu user state (pending_bank, pending_transfer_pick, ...) và các setting hệ thống |
+
+**Hàm chính:**
+
+| Hàm | Mô tả |
+|-----|-------|
+| `init_db()` | Tạo tables nếu chưa có, chạy ALTER TABLE migration an toàn |
+| `add_transaction()` | INSERT 1 giao dịch đơn lẻ |
+| `add_transfer(uid, amount, from_bank, to_bank, desc)` | **Atomic**: INSERT 2 dòng đối ứng trong 1 SQLite transaction. `from_bank: -amount`, `to_bank: +amount`. Rollback nếu 1 cái fail. |
+| `get_bank_balance(bank, uid)` | `SUM(amount)` của 1 tài khoản cụ thể |
+| `save_state(uid, dict)` | Lưu trạng thái hội thoại vào bảng `settings` với prefix `state_{uid}_{key}` |
+| `load_state(uid)` | Load toàn bộ state của user, strip đúng prefix để lấy key gốc (e.g. `pending_bank`) |
+| `clear_state(uid)` | Xóa toàn bộ state của user sau khi hoàn thành flow |
+| `cleanup_stale_states()` | Xóa state cũ, giữ 100 gần nhất — gọi bởi `/keepalive` |
+
+---
+
+### `bot.py`
+Telegram bot handler. Chạy ở **webhook mode** (được `app.py` gọi `bot.process_new_updates()`).
+
+**Commands:**
+
+| Command | Mô tả |
+|---------|-------|
+| `/start` | Chào mừng |
+| `/help` | Tham chiếu đầy đủ tất cả lệnh |
+| `/balance` | Tổng số dư |
+| `/bankbalance` | Số dư từng tài khoản (VCB, ACB, HDBANK, CASH, MOMO) |
+| `/report` | Báo cáo tháng hiện tại (thu, chi, net) |
+| `/asset` | Danh sách tài sản vốn hóa |
+| `/buy <name> <qty> <price>` | Mua tài sản đầu tư |
+| `/liquidate <id> <price>` | Thanh lý tài sản |
+| `/nav <id> [ticker]` | Cập nhật NAV tài sản từ VNSignal |
+| `/refresh` | Refresh NAV tất cả tài sản |
+| `/sync` | Import dữ liệu từ Google Sheets về SQLite |
+| `/project` | Chạy Monte Carlo, gửi chart photo |
+| `/export` | Gửi file Excel transactions |
+| `/web` | Link dashboard |
+| `/setbalance <bank> <amount>` | Đặt số dư ban đầu cho 1 tài khoản |
+| `/ping` `/dbcheck` `/gscheck` `/envcheck` `/logs` `/navtest` | Debug/health check |
+
+**Free-text message flow (core UX):**
+1. User gửi tin nhắn tự nhiên (vd: `-70 xăng`, `chuyển 2tr vcb sang acb`)
+2. `parse_transaction()` (Gemini AI) thử parse trước
+3. Nếu fail → `parse_transaction_local()` (regex) làm fallback
+4. Dựa trên `action`:
+   - **expense/income + bank đã biết** → ghi thẳng vào DB + sync GSheets
+   - **expense/income không có bank** → hiện inline keyboard `[VCB][ACB][HDBANK][CASH][MOMO]`
+   - **transfer đủ thông tin** → gọi `do_transfer()` ngay
+   - **transfer thiếu from_bank** → hỏi từ đâu qua inline keyboard (`trfrom:`)
+   - **transfer thiếu to_bank** → hỏi sang đâu qua inline keyboard (`trto:`)
+
+**Hàm transfer quan trọng:**
+
+| Hàm | Mô tả |
+|-----|-------|
+| `do_transfer(uid, amount, desc, from_bank, to_bank)` | Gọi `add_transfer()` atomic, sync GSheets tab Transfers, hiển thị balance 2 bank |
+| `ask_transfer_from(uid, amount)` | Gửi keyboard hỏi tài khoản nguồn, lưu state `pending_transfer_pick` |
+| `ask_transfer_to(uid, amount, from_bank)` | Gửi keyboard hỏi tài khoản đích (loại from_bank khỏi danh sách) |
+| `handle_trfrom_callback` | Sau khi chọn from → đổi keyboard thành chọn to |
+| `handle_trto_callback` | Sau khi chọn to → gọi `do_transfer()`, edit message xóa keyboard |
+
+**Inline keyboard callbacks:**
+
+| Prefix | Xử lý |
+|--------|-------|
+| `bank:` | Chọn bank cho expense/income |
+| `cap:yes/no` | Quyết định vốn hóa tài sản |
+| `trfrom:` | Chọn tài khoản nguồn transfer |
+| `trto:` | Chọn tài khoản đích transfer |
+
+---
+
+### `local_parser.py`
+Parser thuần Python (không cần API), dùng regex + keyword matching. Chạy khi Gemini fail hoặc không có API key.
+
+**Nhận dạng:**
+- **Amount**: hỗ trợ `2tr`, `500k`, `1.5tr`, `200,000`, `50đ`
+- **Bank**: `vcb/vietcombank → VCB`, `acb → ACB`, `momo → MOMO`, `tiền mặt/cash → CASH`, ...
+- **Action**:
+  - `income`: "nhận", "lương", "thưởng", "cashback", ...
+  - `transfer`: `TRANSFER_PATTERN` — regex bắt "chuyển X từ A sang B"
+  - `transfer` ngắn: `TRANSFER_SHORT_PATTERN` — "rút X từ A" (to_bank mặc định CASH)
+  - `expense`: mặc định nếu không khớp
+- **Category**: scoring keyword (food, transport, entertainment, bill, health, shopping, salary)
+- **Description**: loại bỏ amount tokens và bank keywords, giữ lại nội dung chính
+
+---
+
+### `llm_parser.py`
+Gọi Gemini AI (`gemini-1.5-flash`) với prompt tiếng Việt để parse transaction. Trả về JSON với:
+`{action, amount, category, bank, from_bank, to_bank, description}`
+
+Được gọi trước `local_parser`. Nếu fail hoặc không có `GEMINI_API_KEY` → trả về `None` → fallback local.
+
+---
+
+### `finance_logic.py`
+Layer tính toán thuần (không ghi DB, không side effect):
+
+| Hàm | Mô tả |
+|-----|-------|
+| `get_balance(user_id)` | `SUM(amount)` tất cả transactions (trừ is_asset=1). Transfer không ảnh hưởng vì net=0 |
+| `get_monthly_summary(user_id, year, month)` | Thu + chi tháng, **exclude category='transfer'** |
+| `get_category_breakdown()` | Tổng chi theo category, exclude transfer |
+| `get_cash_flow(months=12)` | Mảng 12 tháng gần nhất, mỗi tháng có income/expense/net |
+| `get_full_report()` | Gộp tất cả trên vào 1 dict cho dashboard/API |
+
+> ⚠️ **Lưu ý thiết kế**: Transfer category='transfer' bị **exclude** khỏi mọi báo cáo thu/chi. Chỉ ảnh hưởng balance từng bank (qua `get_bank_balance()` trong database.py).
+
+---
+
+### `asset_manager.py`
+Quản lý vòng đời tài sản:
+
+| Hàm | Mô tả |
+|-----|-------|
+| `get_asset_summary()` | Tổng hợp: active count, total original/current value, list chi tiết |
+| `run_monthly_depreciation()` | Khấu hao thẳng: `monthly = original_value / depreciation_months`, trừ vào `current_value`, ghi `depreciation_log` |
+| `liquidate_asset(aid, sell_price)` | Đặt `is_active=0`, tính gain/loss, ghi transaction thu nhập từ thanh lý |
+
+---
+
+### `gsheets_sync.py`
+Ghi dữ liệu lên Google Sheets. Mỗi hàm tự authenticate và append row:
+
+| Hàm | Tab GSheets | Columns |
+|-----|-------------|---------|
+| `sync_expense_to_gsheet(data)` | `Expenses` | Date, Amount, Category, Description, Bank Account |
+| `sync_transfer_to_gsheet(data)` | `Transfers` (**auto-create**) | Date, Amount, From, To, Description |
+| `sync_asset_to_gsheet(data)` | `Transaction` (Portfolio sheet) | Ngày, Loại GD, Tài sản, Giá trị, Phí, Thuế, Dòng tiền ròng, Ghi chú |
+| `sync_capitalized_asset(data)` | `Capitalized Assets` | Date, Tên, Gốc, Còn lại, Tháng, KH/tháng, Đã KH, Trạng thái |
+| `sync_depreciation_log(data)` | `Depreciation Log` | Date, Tên, Period, Amount, Remaining |
+
+> Tab `Transfers` được **tự động tạo** khi gọi lần đầu nếu chưa tồn tại trong Google Sheet.
+
+---
+
+### `gsheets_reader.py`
+Import dữ liệu từ Google Sheets **về** SQLite (chiều ngược lại với `gsheets_sync.py`):
+- `sync_all_from_sheets()` — đọc Expenses + Portfolio, import vào DB, dedup theo date+amount+desc
+- `read_expenses_from_sheet()` / `read_portfolio_from_sheet()` — đọc raw data để preview
+- Được trigger bởi `/sync` command
+
+---
+
+### `nav_fetcher.py`
+Lấy NAV (Net Asset Value) quỹ mở từ VNSignal API:
+- `fetch_nav_from_vnsignal(ticker)` — trả về (nav, date, error)
+- `update_asset_nav(asset_id, ticker)` — cập nhật `last_nav` + `current_value` của tài sản
+- `refresh_all_assets()` — chạy update cho tất cả assets có ticker
+- Trigger: `/nav <id> [ticker]`, `/refresh`, `/navtest <ticker>`
+
+---
+
+### `app.py`
+Flask application với đầy đủ routes:
+
+**Web pages:**
+
+| Route | Template | Dữ liệu |
+|-------|----------|---------|
+| `/dashboard` | `dashboard.html` | balance, monthly summary, recent 5 txns, assets |
+| `/transactions` | `transactions.html` | paginated txns với filter category/date |
+| `/assets` | `assets.html` | asset summary + list |
+| `/reports` | `reports.html` | full report với cash flow |
+| `/snapshot` | `mobile_snapshot.html` | compact mobile view |
+
+**REST API:**
+
+| Method | Endpoint | Mô tả |
+|--------|----------|-------|
+| GET | `/api/transactions` | Danh sách txns (filter, paginate) |
+| POST | `/api/transactions` | Thêm transaction mới |
+| PUT | `/api/transactions/<id>` | Sửa transaction |
+| DELETE | `/api/transactions/<id>` | Xóa transaction |
+| GET | `/api/summary` | Balance + monthly stats |
+| GET | `/api/assets` | Asset summary |
+| GET | `/api/categories` | Danh sách categories |
+| POST | `/api/run-depreciation` | Trigger khấu hao ngay |
+| GET | `/api/export/excel` | Download file .xlsx |
+
+**Infrastructure:**
+
+| Route | Mô tả |
+|-------|-------|
+| `POST /webhook/<token>` | Nhận Telegram updates, dedup bằng `recent_update_ids`, process trong ThreadPoolExecutor với timeout 12s, dùng `webhook_lock` tránh concurrent processing |
+| `GET /health` | Kiểm tra DB + scheduler |
+| `GET /keepalive` | Touch DB + restart scheduler nếu chết + cleanup stale states |
+| `POST /webhook/register` | Re-register webhook với Telegram |
+| `GET /webhook/info` | Lấy trạng thái webhook từ Telegram API |
+
+---
+
+### `scheduler.py`
+APScheduler background jobs (chạy trong thread của Flask):
+
+| Job | Lịch | Mô tả |
+|-----|------|-------|
+| `backup_db` | Hằng ngày 02:00 | Copy `finance.db` → `finance_backup_YYYYMMDD.db` |
+| `monthly_depreciation` | Ngày 1 hàng tháng 00:05 | Chạy `run_monthly_depreciation()`, ghi log kết quả |
+
+---
+
+### `simulation.py`
+Monte Carlo portfolio projection:
+- `run_monte_carlo(initial_value, monthly_saving, months, n_simulations)` — Geometric Brownian Motion: `S(t+1) = S(t) * exp((μ - 0.5σ²)Δt + σ√Δt * Z)` với `Z ~ N(0,1)`
+- `generate_projection_chart(paths, monthly)` — Vẽ matplotlib chart: median + P10 + P90 bands, trả về `BytesIO` để bot gửi photo
+
+---
+
+### `excel_sync.py`
+Fallback khi không dùng Google Sheets. Ghi vào file Excel local:
+- `sync_expense_to_excel(data)` — append vào `My expenses.xlsx`
+
+---
+
+### `setup_gsheets.py`
+Script chạy **1 lần** để chuẩn bị Google Sheets:
+1. Xác thực service account
+2. Kiểm tra + tạo worksheet `Expenses` trong expense sheet (nếu trống thì thêm header)
+3. Kiểm tra + tạo worksheet `Transaction` trong portfolio sheet
+4. Kiểm tra + tạo worksheet `Capitalized Assets`, `Depreciation Log`, `Transfers`
+5. Report kết quả
+
+> Worksheet `Transfers` cũng được `gsheets_sync.py` tự động tạo khi có transfer đầu tiên (không cần chạy script này trước).
+
+---
+
+## Database Schema (thực tế)
+
+```sql
+CREATE TABLE transactions (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER NOT NULL DEFAULT 0,
+    amount            REAL NOT NULL,          -- dương=vào, âm=ra
+    category          TEXT NOT NULL DEFAULT 'other',  -- 'transfer' được exclude khỏi report
+    description       TEXT DEFAULT '',
+    transaction_date  TEXT NOT NULL DEFAULT (date('now')),
+    is_asset          INTEGER NOT NULL DEFAULT 0,
+    bank_account      TEXT DEFAULT '',        -- VCB | ACB | HDBANK | CASH | MOMO
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE assets (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id               INTEGER NOT NULL DEFAULT 0,
+    transaction_id        INTEGER REFERENCES transactions(id),
+    name                  TEXT NOT NULL,
+    original_value        REAL NOT NULL,
+    current_value         REAL NOT NULL,
+    depreciation_months   INTEGER NOT NULL DEFAULT 12,
+    start_date            TEXT NOT NULL DEFAULT (date('now')),
+    monthly_depreciation  REAL NOT NULL DEFAULT 0,
+    is_active             INTEGER NOT NULL DEFAULT 1,
+    ticker                TEXT DEFAULT '',    -- mã quỹ/CP để fetch NAV
+    last_nav              REAL DEFAULT NULL,
+    last_nav_date         TEXT DEFAULT NULL,
+    created_at            TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE depreciation_log (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id             INTEGER NOT NULL REFERENCES assets(id),
+    month                TEXT NOT NULL,       -- format YYYY-MM
+    depreciation_amount  REAL NOT NULL,
+    remaining_value      REAL NOT NULL
+);
+
+CREATE TABLE settings (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+    -- Dùng double-purpose:
+    -- 1. System settings: key='last_depreciation', value='2025-06-01'
+    -- 2. User state:      key='state_{uid}_{field}', value=JSON
+);
+```
+
+---
+
+## Toàn bộ Data Flows
+
+### Flow 1: Ghi chi tiêu thông thường
+
+```
+User: "-70 xăng vcb"
+    ↓
+bot.py: parse_transaction() [Gemini]
+    → fail hoặc không đủ thông tin
+    ↓
+bot.py: parse_transaction_local() [regex]
+    → action=expense, amount=70000, cat=transport, bank=VCB
+    ↓
+bot.py: add_transaction(uid, -70000, "transport", "xăng", bank="VCB")
+    ↓
+bot.py: sync_expense_to_gsheet({date, -70000, transport, xăng, VCB})
+    → append 1 dòng vào tab "Expenses"
+    ↓
+Bot reply: "✅ Recorded: -70,000 - xăng (VCB)\nBalance: 5,000,000"
+```
+
+### Flow 2: Ghi chi tiêu không nói bank → hỏi keyboard
+
+```
+User: "-70 xăng"
+    ↓ parse → amount=-70000, bank=None
+    ↓
+bot.py: ask_bank(uid, -70000, "transport", "xăng")
+    → save_state: pending_bank={amount, cat, desc}
+    → gửi keyboard [VCB][ACB][HDBANK][CASH][MOMO]
+    ↓
+User bấm: [VCB]
+    ↓
+handle_bank_callback(call, data="bank:VCB")
+    → load_state → pending_bank found
+    → add_transaction(uid, -70000, "transport", "xăng", bank="VCB")
+    → clear_state
+    → sync_expense_to_gsheet(...)
+    → edit message: "✅ Recorded: -70,000 - xăng (VCB)" (keyboard biến mất)
+```
+
+### Flow 3: Chuyển tiền đầy đủ
+
+```
+User: "chuyển 2tr từ vcb sang acb"
+    ↓
+local_parser: TRANSFER_PATTERN match
+    → action=transfer, amount=2000000, from_bank=VCB, to_bank=ACB
+    ↓
+bot.py: do_transfer(uid, 2000000, desc, "VCB", "ACB")
+    ↓
+    database.py: add_transfer() [ATOMIC SQLite transaction]
+        → INSERT transactions: -2,000,000 / bank=VCB / cat=transfer
+        → INSERT transactions: +2,000,000 / bank=ACB / cat=transfer
+        → COMMIT (hoặc ROLLBACK nếu lỗi)
+    ↓
+    gsheets_sync.py: sync_transfer_to_gsheet()
+        → Nếu tab "Transfers" chưa có → auto-create với header
+        → append 1 dòng: [date, 2000000, VCB, ACB, desc]
+    ↓
+    database.py: get_bank_balance("VCB"), get_bank_balance("ACB")
+    ↓
+Bot reply:
+    ✅ Chuyển 2,000,000 VND
+    VCB → ACB
+    💳 VCB: +3,000,000
+    💳 ACB: +7,000,000
+```
+
+### Flow 4: Chuyển tiền không nói bank → hỏi 2 bước
+
+```
+User: "chuyển 500k"
+    ↓ parse → action=transfer, amount=500000, from_bank=None, to_bank=None
+    ↓
+bot.py: ask_transfer_from(uid, 500000)
+    → save_state: pending_transfer_pick={amount=500000, step="from"}
+    → gửi keyboard [VCB][ACB][HDBANK][CASH][MOMO]
+    ↓
+User bấm: [VCB]  → handle_trfrom_callback
+    → update state: step="to", from_bank="VCB"
+    → edit keyboard thành [ACB][HDBANK][CASH][MOMO]  (loại VCB)
+    ↓
+User bấm: [MOMO]  → handle_trto_callback
+    → load state: amount=500000, from_bank="VCB"
+    → clear_state
+    → do_transfer(uid, 500000, "Chuyển từ VCB sang MOMO", "VCB", "MOMO")
+    → edit message: "✅ Chuyển 500,000 VND\nVCB → MOMO\n💳 ..."
+```
+
+### Flow 5: Vốn hóa tài sản
+
+```
+User: "-15000000 mua laptop"  (amount > 199)
+    ↓ handle_bank_callback chọn VCB
+    ↓ add_transaction(-15000000, "shopping", "mua laptop", bank=VCB)
+    ↓ (amount < -199) → hỏi: "Capitalize as asset? [✅ Yes][❌ No]"
+    ↓
+User bấm [✅ Yes]  → handle_cap_callback(yes)
+    → save_state: pending_capitalize={tid, value=15000000, step="ask_name"}
+    → edit message: "📦 Capitalize: Yes"
+    → gửi: "What is the asset name?"
+    ↓
+User: "MacBook Pro 14"
+    → handle_capitalize_step(step=ask_name)
+    → save name, step="ask_months"
+    → hỏi: "Depreciation period (months)?"
+    ↓
+User: "36"
+    → handle_capitalize_step(step=ask_months)
+    → add_asset(uid, tid, "MacBook Pro 14", 15000000, 36)
+    → UPDATE transactions SET is_asset=1 WHERE id=tid
+    → clear_state
+    → reply: "✅ Asset capitalized! Monthly: 416,667"
+```
+
+### Flow 6: Web Dashboard
+
+```
+Browser: GET /dashboard
+    ↓
+app.py: dashboard()
+    ↓
+    finance_logic.get_full_report() → {balance, monthly, cash_flow, categories}
+    asset_manager.get_asset_summary() → {active_count, total_current, assets[]}
+    database.get_transactions(limit=5) → recent transactions
+    ↓
+Flask render_template("dashboard.html", ...)
+    ↓
+Browser: Dark UI với balance card, cash flow bar chart, category donut, asset list
+```
+
+### Flow 7: Scheduled Jobs (background)
+
+```
+Hàng ngày 02:00:
+    scheduler.py → backup_database()
+    → copy instance/finance.db → instance/finance_backup_20250625.db
+
+Ngày 1 hàng tháng 00:05:
+    scheduler.py → run_monthly_depreciation()
+    → asset_manager.run_monthly_depreciation()
+    → For each active asset:
+        current_value -= original_value / depreciation_months
+        INSERT depreciation_log
+        IF current_value <= 0: is_active = 0
+    → set_setting("last_depreciation", "2025-06-01")
+```
+
+---
+
+## Tài khoản ngân hàng hỗ trợ
+
+| Tên | Keywords nhận dạng |
+|-----|-------------------|
+| `VCB` | vcb, vietcombank, vietcom |
+| `ACB` | acb, asia commercial |
+| `HDBANK` | hdbank, hd bank |
+| `CASH` | cash, tiền mặt, tien mat, mặt, tienmat |
+| `MOMO` | momo, ví điện tử |
+
+Thêm bank mới: chỉnh `BANK_KEYWORDS` trong `local_parser.py` và `VALID_BANKS` trong `bot.py`.
+
+---
+
+## Setup & Chạy
+
+### Cài đặt local
+
+```bash
+git clone <repo>
+cd telegram-finance-bot
+
+python -m venv venv
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # Mac/Linux
+
+pip install -r requirements.txt
+cp .env.example .env         # điền giá trị vào .env
+python app.py                # chạy Flask dev server
+```
+
+### Biến môi trường (`.env`)
+
+| Biến | Bắt buộc | Mô tả |
+|------|----------|-------|
+| `TELEGRAM_TOKEN` | ✅ | Bot token từ @BotFather |
+| `WEBHOOK_URL` | ✅ (production) | URL public, vd: `https://user.pythonanywhere.com/webhook/TOKEN` |
+| `SECRET_KEY` | ✅ | Chuỗi ngẫu nhiên cho Flask session |
+| `ADMIN_USER_ID` | Nên có | Telegram user ID của bạn (lấy qua @userinfobot) |
+| `GEMINI_API_KEY` | Khuyến nghị | Key Gemini AI — nếu không có thì chỉ dùng local parser |
+| `GOOGLE_CREDENTIALS_FILE` | Nếu dùng GSheets | Đường dẫn file JSON service account |
+| `EXPENSE_SHEET_NAME` | Nếu dùng GSheets | Tên Google Sheet chứa Expenses |
+| `PORTFOLIO_SHEET_NAME` | Nếu dùng GSheets | Tên Google Sheet chứa Portfolio |
+
+### Google Sheets Setup
+
+```bash
+# 1. Vào Google Cloud Console → tạo Service Account → download JSON
+# 2. Share Google Sheet với email service account (Editor)
+# 3. Đặt tên Sheet trong .env
+python setup_gsheets.py      # tạo tabs và headers
+```
+
+Tab `Transfers` sẽ **tự động được tạo** khi có transfer đầu tiên — không cần chạy setup.
+
+---
+
+## Deploy lên PythonAnywhere
+
+> Xem chi tiết: [`PYTHONANYWHERE_SETUP.md`](PYTHONANYWHERE_SETUP.md)
+
+```bash
+# 1. Upload code lên PythonAnywhere (git clone hoặc upload)
+pip3.11 install --user -r requirements.txt
+
+# 2. WSGI file trỏ vào app.py
+# from app import app as application
+
+# 3. Set webhook
+python3.11 -c "
+from config import TELEGRAM_TOKEN, WEBHOOK_URL
+import requests
+r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook',
+                  json={'url': WEBHOOK_URL, 'max_connections': 1})
+print(r.json())
+"
+
+# 4. Keepalive (QUAN TRỌNG — free tier sleep sau 10p)
+# Dùng cron-job.org, gọi /keepalive mỗi 3 phút
+# URL: https://yourusername.pythonanywhere.com/keepalive
+```
+
+**Webhook flow trên production:**
+```
+Telegram → POST /webhook/<token>
+app.py: dedup update_id → webhook_lock.acquire() → ThreadPoolExecutor(timeout=12s)
+    → bot.process_new_updates([update])
+    → [all handlers run] → webhook_lock.release()
+→ return "OK" 200
 ```
 
 ---
 
 ## Tech Stack
 
-| Dependency | Version | Role |
-|-----------|---------|------|
-| Flask | 3.1.1 | Web server, REST API, Jinja2 templates |
-| pyTelegramBotAPI | 4.28.0 | Telegram bot framework |
-| python-dotenv | 1.1.0 | Load `.env` config |
-| gunicorn | 23.0.0 | WSGI server (production) |
-| requests | 2.32.3 | HTTP calls (Telegram API, webhook setup) |
-| openpyxl | 3.1.5 | Read/write Excel files |
+| Package | Version | Role |
+|---------|---------|------|
+| Flask | 3.1.1 | Web server + REST API + Jinja2 |
+| pyTelegramBotAPI | 4.28.0 | Telegram bot framework (webhook mode) |
+| python-dotenv | 1.1.0 | Load `.env` |
+| gunicorn | 23.0.0 | WSGI production server |
+| gspread | 6.1.2 | Google Sheets API client |
+| google-auth | 2.30.0 | Service account authentication |
+| openpyxl | 3.1.5 | Đọc/ghi Excel |
 | APScheduler | 3.11.0 | Scheduled background jobs |
-| gspread | 6.1.2 | Google Sheets API (cloud sync) |
-| google-auth | 2.30.0 | Google service account auth |
-| numpy | 2.1.2 | Monte Carlo simulation math |
-| matplotlib | 3.9.2 | Projection chart generation |
-| Chart.js | (CDN) | Client-side charts on dashboard |
-
----
-
-## Directory Structure
-
-```
-telegram-finance-bot/
-├── app.py                  # Flask app: all routes, API endpoints, webhook handler
-├── bot.py                  # Telegram bot: all command handlers, message parsing, inline keyboards
-├── database.py             # SQLite layer: schema, CRUD for transactions/assets/depreciation/settings
-├── finance_logic.py        # Business logic: balance calc, monthly summary, cash flow, reports
-├── asset_manager.py        # Asset engine: depreciation, liquidation, asset summary
-├── scheduler.py            # APScheduler: daily backup (02:00), monthly depreciation (1st @ 00:05)
-├── simulation.py           # Monte Carlo: Geometric Brownian Motion, chart generation
-├── gsheets_sync.py         # Google Sheets: sync expense & asset data to cloud sheets
-├── excel_sync.py           # Local Excel: legacy sync to .xlsx/.xlsm (fallback)
-├── config.py               # Env var loader: token, webhook URL, DB path, secret key, admin ID
-├── setup_gsheets.py        # One-time setup: verify access, create sheets, add headers
-├── read_excel_temp.py      # Utility: inspect Excel file structure with pandas
-├── deploy.bat              # Windows script: git init → gh repo create → push
-├── requirements.txt        # Pip dependencies (11 packages)
-├── .env                    # Runtime configuration (gitignored)
-├── .env.example            # Template for .env
-├── .gitignore              # Ignores .env, __pycache__, venv/, .idea/, .vscode/
-├── portfolio_dashboard.html# Standalone HTML portfolio dashboard (Vietnamese, Excel upload via SheetJS)
-├── genuine-box-500214-e2-5a8934bf85be.json  # Google service account key (gitignored)
-├── My portfolio.xlsm       # Local portfolio Excel file with VBA macros
-├── instance/
-│   └── finance.db          # SQLite database (auto-created at first run)
-├── static/
-│   ├── css/style.css        # Dark blue theme, sidebar layout, cards, responsive utilities
-│   └── js/chart.js          # Chart.js config: doughnut & bar charts
-└── templates/
-    ├── dashboard.html       # Main overview: balance, cash flow chart, recent transactions, category donut
-    ├── transactions.html    # Full transaction table: filters, pagination, CRUD modal via REST API
-    ├── assets.html          # Asset list: depreciation progress bars, status badges, summary cards
-    ├── reports.html         # Reports: cash flow trend, income vs expense, top categories, monthly table
-    ├── settings.html        # System info, one-click depreciation run, export controls
-    └── mobile_snapshot.html # Telegram Mini App: compact mobile view of balance & assets
-```
-
----
-
-## File-by-File Breakdown
-
-### `config.py` (18 lines)
-Loads environment variables via `python-dotenv`. Exposes: `TELEGRAM_TOKEN`, `WEBHOOK_URL`, `DATABASE_PATH`, `SECRET_KEY`, `ADMIN_USER_ID`, `GSHEETS_JSON_PATH`. All other modules import config from here.
-
-### `database.py` (240 lines)
-SQLite layer with four tables:
-
-| Table | Columns | Purpose |
-|-------|---------|---------|
-| `transactions` | id, type (income/expense), amount, category, description, bank, date, created_at | All income/expense records |
-| `assets` | id, name, description, purchase_price, current_value, purchase_date, category, lifespan_months, status (active/liquidated), liquidated_price, liquidated_date, created_at | Capitalized assets with depreciation |
-| `depreciation_log` | id, asset_id (FK), month, year, depreciation_amount, created_at | Monthly depreciation history |
-| `settings` | key (PK), value | Key-value config store |
-
-Functions: `init_db()`, `add_transaction()`, `get_transactions()`, `update_transaction()`, `delete_transaction()`, `get_balance()`, `add_asset()`, `get_assets()`, `update_asset()`, `liquidate_asset()`, `add_depreciation_log()`, `get_depreciation_logs()`, `get_setting()`, `set_setting()`, `check_duplicate_transaction()`, `backup_database()`.
-
-### `bot.py` (467 lines)
-Telegram bot with 11 commands + free-text message parsing. Uses `pyTelegramBotAPI` with polling mode (or webhook mode via Flask).
-
-**Commands:**
-- `/start` — Welcome + feature tour
-- `/help` — Command reference (grouped by feature)
-- `/balance` — Current balance across 3 bank accounts, with total
-- `/report [month] [year]` — Detailed monthly summary: income, expense, top categories, cash flow
-- `/asset` — List all assets with depreciation status
-- `/web` — Web dashboard link
-- `/project` — Monte Carlo 5-year portfolio projection (returns matplotlib chart photo)
-- `/liquidate <asset_id> [price]` — Liquidate an asset at given price
-- `/export` — Excel file export (triggers Flask download route)
-- `/buy <name> <price>` — Register a new asset (alternative to auto-capitalization)
-- `/sell <asset_id> <price>` — Alias for `/liquidate`
-
-**Free-text message parsing** (the core UX):
-1. User sends `+500 salary` or `-200 lunch`
-2. `parse_transaction()` extracts type (+/-), amount, and description
-3. `guess_category()` matches description keywords against a mapping to auto-assign category
-4. For expenses ≥ 1,000,000 VND: bot asks "Do you want to capitalize this as an asset?" with inline buttons
-5. For all expenses: bank account selection via inline keyboard (3 buttons: `Techcombank`, `VPBank`, `Tiền mặt`)
-6. Saves to DB → syncs to Google Sheets (if configured) → syncs to local Excel (if file exists)
-7. For asset capitalization flow: asks name, category from pick list, lifespan in months, confirms creation
-
-**Category auto-guess mapping** (hardcoded in `bot.py`):
-Food → `Ăn uống`, Coffee → `Ăn uống`, Transport → `Đi lại`, Gas → `Đi lại`, etc. Complete mapping covers ~30 Vietnamese categories.
-
-### `app.py` (238 lines)
-Flask application factory. Routes:
-
-| Method | Route | Function | Description |
-|--------|-------|----------|-------------|
-| GET | `/` | redirect to `/dashboard` | Root redirect |
-| GET | `/dashboard` | `dashboard()` | Main overview page |
-| GET | `/transactions` | `transactions()` | Transaction list |
-| GET | `/assets` | `assets()` | Asset management |
-| GET | `/reports` | `reports()` | Charts & reports |
-| GET | `/settings` | `settings()` | System settings |
-| GET | `/api/transactions` | `list_transactions()` | JSON transaction list |
-| POST | `/api/transactions` | `add_transaction()` | Create transaction (JSON body) |
-| PUT | `/api/transactions/<id>` | `update_transaction()` | Update transaction |
-| DELETE | `/api/transactions/<id>` | `delete_transaction()` | Delete transaction |
-| GET | `/api/summary` | `api_summary()` | Balance + monthly stats (JSON) |
-| GET | `/api/assets` | `api_assets()` | Asset summary (JSON) |
-| GET | `/api/categories` | `api_categories()` | All known categories (JSON) |
-| GET | `/api/monthly-data` | `api_monthly_data()` | Monthly breakdown (JSON, for reports) |
-| POST | `/api/run-depreciation` | `run_depreciation()` | Trigger depreciation now |
-| GET | `/ping` | `ping()` | Health check |
-| POST | `/webhook/<token>` | `webhook()` | Telegram bot webhook receiver |
-| GET | `/export/excel` | `export_excel()` | Download transactions as `.xlsx` |
-| GET | `/mobile-snapshot` | `mobile_snapshot()` | Mobile Mini App view |
-
-Each HTML route injects data via `finance_logic.py` (or direct DB queries) and renders a Jinja2 template.
-
-### `finance_logic.py` (103 lines)
-Pure calculation layer (no side effects):
-- `get_balance(db_path)` — Returns dict with bank balances (`techcombank`, `vpbank`, `tien_mat`) and total
-- `get_monthly_summary(year, month)` — Income total, expense total, net, transaction count
-- `get_category_breakdown(year, month, type)` — Per-category totals for pie chart
-- `get_cash_flow(months=12)` — Monthly income/expense arrays for bar chart
-- `get_top_categories(year, month, type, limit=5)` — Top N categories
-- `get_full_report(year, month)` — Combines all above into one dict for the reports page
-
-### `asset_manager.py` (110 lines)
-Manages the asset lifecycle:
-- `run_monthly_depreciation()` — For all active assets, calculates straight-line depreciation (`purchase_price / lifespan_months`), creates `depreciation_log` entry, decrements `current_value`. If `current_value` reaches 0, marks asset as `liquidated`. Returns list of depreciation events.
-- `liquidate_asset(asset_id, liquidated_price)` — Sets `status='liquidated'`, records `liquidated_price` and `liquidated_date`, computes gain/loss vs `current_value`.
-- `get_asset_summary()` — Returns active count, total original value, total current value, liquidated count, per-asset details with depreciation percentage.
-
-Depreciation formula: `monthly_depreciation = purchase_price / lifespan_months`. Straight-line, no residual value.
-
-### `scheduler.py` (57 lines)
-Uses `APScheduler` with a background thread:
-- **Daily at 02:00** — `backup_database()` copies `finance.db` to `finance_backup_YYYYMMDD.db`
-- **1st of each month at 00:05** — `run_monthly_depreciation()` then logs result via `set_setting('last_depreciation', timestamp)`
-
-Scheduler starts via `start_scheduler(app)` which is called in `app.py` during app initialization.
-
-### `simulation.py` (113 lines)
-Monte Carlo portfolio projection engine:
-- Defines 4 asset classes with fixed parameters: `DCDS` (mu=0.08, sigma=0.15), `DCDE` (mu=0.10, sigma=0.20), `ETFVN30` (mu=0.09, sigma=0.18), `CCQ` (mu=0.07, sigma=0.10). All prices start at 10,000 VND.
-- `run_simulation(years=5, simulations=1000)` — For each asset, runs `simulations` Geometric Brownian Motion paths over `years * 12` months. `GBM: S(t+1) = S(t) * exp((mu - 0.5*sigma^2)*dt + sigma * sqrt(dt) * N(0,1))`. Returns a dict with `dates`, `median`, `percentile_5`, `percentile_95` per asset.
-- `generate_projection_chart(years=5, simulations=1000)` — Generates a matplotlib chart (RGB array via `BytesIO`) showing median + 5th/95th percentile bands for each asset. Chart has Vietnamese labels ("Dự báo danh mục đầu tư 5 năm", etc).
-- Called by `/project` command in `bot.py` and sends the chart as a Telegram photo.
-
-### `gsheets_sync.py` (108 lines)
-Google Sheets sync module:
-- `get_gsheet_client()` — Authenticates via service account JSON and returns `gspread.Client`
-- `sync_expense_to_gsheet(data)` — Opens the expense sheet by URL or key, finds the "Expenses" worksheet, appends a row: `[date, amount, category, description, bank]`
-- `sync_asset_to_gsheet(data)` — Opens the portfolio sheet, finds the "Transaction" worksheet, appends a row with Vietnamese headers: `[Ngày mua, Mã CP, Giá mua, Số lượng, Giá hiện tại, Giá trị hiện tại, Trạng thái]`
-
-Both functions are called from `bot.py` after every successful transaction or asset creation. Failure is caught and logged silently to avoid disrupting the user experience.
-
-### `excel_sync.py` (72 lines)
-Legacy local Excel sync (fallback when Google Sheets is not configured):
-- `sync_expense_to_excel(data)` — Writes/creates `My expenses.xlsx` via `openpyxl`, appending rows
-- `sync_asset_to_portfolio(data)` — Opens `My portfolio.xlsm` with `openpyxl` (read-only preserves VBA macros), finds the first sheet, appends asset data. Uses a `keep_vba` workaround: opens for data-only reading, collects rows, then re-creates the workbook structure.
-
-### `setup_gsheets.py` (60 lines)
-One-time setup script:
-1. Authenticates via service account JSON
-2. Opens the expense sheet by URL → checks for "Expenses" worksheet (creates if missing)
-3. Opens the portfolio sheet → checks for "Transaction" worksheet (creates if missing)
-4. Adds header rows if sheets are empty
-5. Reports success/failure for each step
-Run via `python setup_gsheets.py` after configuring `.env`.
-
-### `config.py` (18 lines)
-Loads and exports environment variables. Uses `os.getenv()` with fallback defaults. Paths are resolved relative to the project root.
-
-### Templates (6 files)
-All templates extend a common layout (sidebar + header) and use Jinja2 templating:
-
-- **`dashboard.html`** (134 lines) — Balance card (total + per-bank), 4 stat cards (monthly income/expense/net), cashflow Chart.js bar chart, recent transactions table (last 10), category donut chart, active assets sidebar.
-- **`transactions.html`** (157 lines) — Full table with type/amount/category/description/bank/date columns. Date range filters + type filter. Inline JavaScript implements full CRUD via REST API calls (`fetch()`) with a modal form — no page reloads.
-- **`assets.html`** (83 lines) — Summary cards (active/total assets, original/current value). Per-asset cards with progress bars (depreciation %), status badges (Active/Liquidated), purchase date, current value.
-- **`reports.html`** (81 lines) — 4 Chart.js canvases: cash flow trend (line), income vs expense (bar), top spending categories (pie), net balance trend (line). Monthly breakdown table below.
-- **`settings.html`** (68 lines) — System info: DB path, version, last depreciation. Action buttons: "Run Depreciation Now", "Export Excel". Instructions for setup.
-- **`mobile_snapshot.html`** (85 lines) — Telegram Mini App view. Compact layout: total balance, monthly income/expense, active assets count, link to full dashboard. Designed for 400×600 mobile viewport.
-
-### Static Assets
-- **`static/css/style.css`** (264 lines) — Dark blue theme (`rgb(0, 25, 152)`). Sidebar navigation (fixed left), dashboard grid layout, card components with shadows, table styling, badge variants (success/warning/danger), progress bars, responsive breakpoints, modal overlay.
-- **`static/js/chart.js`** (137 lines) — Two Chart.js configurations: 1) Doughnut chart for category breakdown (income/expense toggle), 2) Bar chart for monthly cash flow. Dark blue color palette matching the CSS theme. Formatters for VND currency.
-
-### Additional Files
-- **`portfolio_dashboard.html`** (444 lines) — Standalone HTML page (not Flask-served). Vietnamese language. Has tabs: Overview (allocation donut, value bar), Projection 5Y (line chart), Best/Base/Worst scenarios (bar chart), Transactions (table). Uses SheetJS (xlsx) library for Excel file upload. Includes hardcoded sample data. Can be opened directly in a browser (no server needed). This is a supplementary tool, not part of the main app.
-- **`read_excel_temp.py`** (16 lines) — Temporary debug script: reads `My portfolio.xlsm` with `openpyxl`, prints sheet names and first 5 rows of each sheet using pandas. Used during development to understand Excel structure.
-- **`deploy.bat`** (45 lines) — Windows automation: initializes git, creates `.gitignore`, adds all files, commits, creates GitHub repo via `gh repo create`, and pushes. Runs on Windows only.
-- **`genuine-box-500214-e2-5a8934bf85be.json`** (13 lines) — Google Cloud service account private key. Contains `type`, `project_id`, `private_key_id`, `private_key`, `client_email`, `client_id`, `auth_uri`, `token_uri`. The `client_email` is used by `gspread` for authentication.
-- **`My portfolio.xlsm`** — Binary Excel file with VBA macros. Used by `excel_sync.py` as the legacy portfolio tracking file (fallback when Google Sheets is unavailable).
-
----
-
-## Database Schema
-
-```sql
--- Core transaction log
-CREATE TABLE transactions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
-    amount REAL NOT NULL,
-    category TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    bank TEXT DEFAULT 'tien_mat',
-    date TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now'))
-);
-
--- Capitalized assets
-CREATE TABLE assets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    purchase_price REAL NOT NULL,
-    current_value REAL NOT NULL,
-    purchase_date TEXT NOT NULL,
-    category TEXT NOT NULL,
-    lifespan_months INTEGER NOT NULL,
-    status TEXT DEFAULT 'active' CHECK(status IN ('active', 'liquidated')),
-    liquidated_price REAL,
-    liquidated_date TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
-);
-
--- Monthly depreciation trail
-CREATE TABLE depreciation_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    asset_id INTEGER NOT NULL,
-    month INTEGER NOT NULL,
-    year INTEGER NOT NULL,
-    depreciation_amount REAL NOT NULL,
-    created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (asset_id) REFERENCES assets(id)
-);
-
--- Key-value settings
-CREATE TABLE settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-```
-
-**Relationships:**
-- `depreciation_log.asset_id` → `assets.id` (one asset has many depreciation logs)
-- No FK cascade — application code handles consistency (`asset_manager.py`)
-
----
-
-## Data Flows
-
-### Flow 1: Recording an Expense
-
-```
-User sends "-200 lunch" in Telegram
-    │
-    ▼
-bot.py: parse_transaction()
-    │  Extracts: type=expense, amount=200, description="lunch"
-    │
-    ▼
-bot.py: guess_category("lunch")
-    │  Matches keyword → returns "Ăn uống"
-    │
-    ▼  (if amount >= 1,000,000 VND)
-bot.py: sends inline keyboard "Do you want to capitalize this as an asset?"
-    │  If YES → asset capitalization flow (name, category, lifespan)
-    │  If NO → continue
-    │
-    ▼
-bot.py: sends inline keyboard "Choose bank account"
-    │  [Techcombank] [VPBank] [Tiền mặt]
-    │  User selects one → callback_data = "bank_techcombank" etc.
-    │
-    ▼
-database.py: add_transaction(...)
-    │  INSERT INTO transactions (type, amount, category, description, bank, date)
-    │
-    ▼
-gsheets_sync.py: sync_expense_to_gsheet(data)
-    │  Appends row to Google Sheets "Expenses" worksheet
-    │  (silent on failure)
-    │
-    ▼
-excel_sync.py: sync_expense_to_excel(data)  (if file exists)
-    │  Appends row to My expenses.xlsx
-    │
-    ▼
-bot.py: sends "✅ Ghi nhận thành công! ..." confirmation message
-```
-
-### Flow 2: Asset Lifecycle
-
-```
-User sends "-15000000 xe máy" (expense >= 1M threshold)
-    │
-    ▼
-Auto-capitalization prompt → User agrees
-    │
-    ▼
-bot.py: asks asset name, category, lifespan
-    │
-    ▼
-database.py: add_asset(name, purchase_price, lifespan_months, category, purchase_date)
-    │  current_value = purchase_price, status = 'active'
-    │
-    ▼
-gsheets_sync.py: sync_asset_to_gsheet(data)
-    │
-    ▼
-scheduler.py: run_monthly_depreciation()  (1st of month at 00:05)
-    │  Or: POST /api/run-depreciation (manual trigger)
-    │
-    ▼
-asset_manager.py: for each active asset:
-    │  depreciation = purchase_price / lifespan_months
-    │  current_value -= depreciation
-    │  INSERT INTO depreciation_log (asset_id, month, year, amount)
-    │  IF current_value <= 0: status = 'liquidated'
-    │
-    ▼
-User can manually liquidate via:
-    │  /liquidate <id> <price>
-    │  database.py: liquidate_asset(id, price)
-    │  Sets liquidated_price, liquidated_date, status='liquidated'
-```
-
-### Flow 3: Web Dashboard Rendering
-
-```
-User opens browser at /dashboard
-    │
-    ▼
-app.py: dashboard() route
-    │
-    ├── finance_logic.py: get_balance()         → bank balances, total
-    ├── finance_logic.py: get_monthly_summary()  → income, expense, net
-    ├── finance_logic.py: get_cash_flow()        → 12-month arrays
-    ├── finance_logic.py: get_category_breakdown()→ category totals
-    └── database.py: get_transactions(limit=10)  → recent items
-    │
-    ▼
-Flask renders templates/dashboard.html with all data
-    │  Jinja2 fills balance cards, stat cards, transaction table
-    │  Chart.js configs embedded in HTML reference static/js/chart.js
-    │  charts.js renders doughnut (categories) and bar (cash flow)
-    │
-    ▼
-User sees a complete dashboard with all financial data
-```
-
----
-
-## Bot Commands Reference
-
-| Command | Arguments | Description | Handler in `bot.py` |
-|---------|-----------|-------------|---------------------|
-| `/start` | none | Welcome message with feature highlights | `cmd_start()` |
-| `/help` | none | Grouped command reference | `cmd_help()` |
-| `/balance` | none | Per-bank + total balance | `cmd_balance()` |
-| `/report` | `[month] [year]` | Monthly income/expense/categories (defaults to current) | `cmd_report()` |
-| `/asset` | none | List all assets with depreciation | `cmd_asset()` |
-| `/web` | none | Return web dashboard URL | `cmd_web()` |
-| `/project` | `[years=5] [simulations=1000]` | Monte Carlo projection chart | `cmd_project()` |
-| `/liquidate` | `<asset_id> [price]` | Liquidate an asset | `cmd_liquidate()` |
-| `/export` | none | Download transactions Excel file | `cmd_export()` |
-| `/buy` | `<name> <price>` | Register a new asset directly | `cmd_buy()` |
-| `/sell` | `<asset_id> <price>` | Alias for `/liquidate` | `cmd_sell()` |
-
-Plus a **message handler** (no prefix) that parses free-text like `+500 salary` or `-200 lunch`.
-
----
-
-## API Endpoints
-
-All JSON endpoints accept/return `Content-Type: application/json`.
-
-| Method | Endpoint | Request Body / Params | Response |
-|--------|----------|-----------------------|----------|
-| GET | `/api/transactions` | `?type=expense&category=An+uong&from=2024-01-01&to=2024-12-31` | `{transactions: [{id, type, amount, category, description, bank, date}]}` |
-| POST | `/api/transactions` | `{type, amount, category, description, bank, date}` | `{success: true, id: N}` |
-| PUT | `/api/transactions/<id>` | `{type?, amount?, category?, description?, bank?, date?}` | `{success: true}` |
-| DELETE | `/api/transactions/<id>` | none | `{success: true}` |
-| GET | `/api/summary` | none | `{balance: {total, techcombank, vpbank, tien_mat}, monthly: {income, expense, net, count}}` |
-| GET | `/api/assets` | none | `{summary: {active, total, original_value, current_value}, assets: [{...}]}` |
-| GET | `/api/categories` | none | `{categories: ["An uong", "Di lai", ...]}` |
-| GET | `/api/monthly-data` | `?year=2024` | `{months: [{month, income, expense, net}], year}` |
-| POST | `/api/run-depreciation` | none | `{success: true, events: [{asset, amount, new_value}]}` |
-| GET | `/ping` | none | `"pong"` (plain text) |
-| POST | `/webhook/<token>` | Telegram Update JSON | `200 OK` |
-| GET | `/export/excel` | none | Excel file download |
-| GET | `/mobile-snapshot` | none | HTML page (Mini App) |
-| GET | `/health` | none | JSON health check (DB, scheduler, error count) |
-| GET | `/keepalive` | none | Keep app alive, touch DB, cleanup stale state |
-| POST | `/webhook/register` | none | Re-register Telegram webhook |
-| GET | `/webhook/info` | none | Show webhook status from Telegram API |
-
----
-
-## How Key Features Work
-
-### Bank Account Selection
-When recording any expense, the bot presents 3 inline keyboard buttons: `Techcombank`, `VPBank`, `Tiền mặt`. Each button has a callback prefix like `bank_techcombank`. The callback handler extracts the bank name and saves it to `transactions.bank`. The `get_balance()` function in `finance_logic.py` sums amounts per bank group. The dashboard shows each bank's balance separately plus a total.
-
-### Category Auto-Guessing
-Hardcoded keyword→category mapping in `bot.py`. For example: `"lunch" → "Ăn uống"`, `"taxi" → "Đi lại"`, `"rent" → "Nhà cửa"`, `"salary" → "Lương"`. The mapping is a dict with ~30 entries. Matching is case-insensitive and checks if any keyword is a substring of the description. Falls back to `"Khác"` (Other) if no match.
-
-### Asset Capitalization Threshold
-Any expense ≥ 1,000,000 VND triggers an inline confirmation: "Do you want to capitalize this as an asset?" If the user agrees, the bot walks them through: asset name → category pick list → lifespan in months. It creates both a transaction (expense) and an asset record. The expense is recorded from the chosen bank; the asset starts depreciating the following month.
-
-### Straight-Line Depreciation
-`monthly_depreciation = purchase_price / lifespan_months`. Runs monthly via APScheduler (1st of month at 00:05) or manually via `POST /api/run-depreciation`. Each run creates a `depreciation_log` row and decrements `assets.current_value`. When `current_value ≤ 0`, asset is auto-liquidated. Depreciation only runs once per month per asset (checked via `depreciation_log`).
-
-### Monte Carlo Simulation (`/project`)
-Uses Geometric Brownian Motion: `S(t+1) = S(t) * exp((μ - 0.5σ²)Δt + σ√Δt * Z)` where `Z ~ N(0,1)`. Runs 1000 simulations per asset over 5 years (default). Plots the median (solid line), 5th percentile (lower band), and 95th percentile (upper band) for each of the 4 asset types (DCDS, DCDE, ETFVN30, CCQ). The chart is rendered via matplotlib with Vietnamese labels and sent as a Telegram photo.
-
-### Google Sheets Sync
-Every transaction and asset operation calls `gsheets_sync.py` functions. These authenticate via the service account JSON file (`genuine-box-500214-e2-...json`), open the configured Google Sheet by URL (stored in `.env` as `GSHEETS_EXPENSE_URL` and `GSHEETS_PORTFOLIO_URL`), and append a row to the appropriate worksheet. Failure is caught and logged but does not block the user operation.
-
-### Scheduled Jobs
-APScheduler runs in a background thread within the Flask app. Two jobs:
-1. **Daily DB backup** — copies `finance.db` → `finance_backup_YYYYMMDD.db` at 02:00
-2. **Monthly depreciation** — runs `asset_manager.run_monthly_depreciation()` at 00:05 on the 1st of each month
-
-The scheduler is initialized in `app.py` via `start_scheduler(app)` after the Flask app is created.
-
-### Telegram Mini App (`/mobile-snapshot`)
-A lightweight mobile-optimized HTML page designed for Telegram's Mini App WebView. Shows: total balance, monthly income/expense, active asset count, and a button linking to the full dashboard. It is served via Flask at `/mobile-snapshot` and designed for a 400×600 viewport.
-
----
-
-## Setup Guide
-
-### Prerequisites
-- Python 3.10+
-- Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- (Optional) Google Cloud service account for Sheets sync
-- (Optional) PythonAnywhere account for deployment
-
-### Local Installation
-
-```bash
-# 1. Clone or copy the project
-cd telegram-finance-bot
-
-# 2. Create virtual environment
-python -m venv venv
-source venv/bin/activate      # Linux/Mac
-# venv\Scripts\activate        # Windows
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Configure environment
-cp .env.example .env
-# Edit .env with your values (see Configuration section)
-
-# 5. Initialize database (auto-creates on first run)
-python -c "from database import init_db; init_db()"
-
-# 6. Run the Flask app (development)
-python app.py
-```
-
-### Configuration (`.env`)
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `TELEGRAM_TOKEN` | Yes | Bot token from BotFather |
-| `WEBHOOK_URL` | For webhook | Public URL for Telegram to call (e.g., `https://yourdomain.com/webhook`) |
-| `DATABASE_PATH` | No | Path to SQLite DB (default: `instance/finance.db`) |
-| `SECRET_KEY` | Yes | Flask session secret key (any random string) |
-| `ADMIN_USER_ID` | No | Telegram user ID for admin-only features |
-| `GSHEETS_EXPENSE_URL` | For GSheets | Google Sheets URL for expense tracking |
-| `GSHEETS_PORTFOLIO_URL` | For GSheets | Google Sheets URL for portfolio tracking |
-| `GSHEETS_JSON_PATH` | For GSheets | Path to service account JSON key file |
-
-### Google Sheets Setup (Optional)
-1. Go to [Google Cloud Console](https://console.cloud.google.com), create project → enable Google Sheets API
-2. Create service account → download JSON key → save as `genuine-box-...json`
-3. Share your Google Sheets with the service account `client_email` (viewer/edit)
-4. Run `python setup_gsheets.py` to create required worksheets and headers
-
----
-
-## Deployment
-
-### PythonAnywhere (Free Tier)
-
-> ⚠️ **PythonAnywhere dùng Python 3.11.** LUÔN dùng `python3.11` và `pip3.11`, KHÔNG dùng `py` hay `pip`.
-> Xem hướng dẫn chi tiết: [`PYTHONANYWHERE_SETUP.md`](PYTHONANYWHERE_SETUP.md)
-
-1. **Create web app**: Manual configuration → Python 3.11
-2. **Clone code**:
-   ```bash
-   git clone https://github.com/nguyenquocminhtrading-design/telegram-finance-bot.git
-   cd telegram-finance-bot
-   ```
-3. **Install deps** (bắt buộc dùng `pip3.11`):
-   ```bash
-   pip3.11 install --user -r requirements.txt
-   ```
-4. **WSGI file** (`/var/www/yourusername_pythonanywhere_com_wsgi.py`):
-   ```python
-   import sys
-   path = '/home/yourusername/telegram-finance-bot'
-   if path not in sys.path:
-       sys.path.append(path)
-   from app import app as application
-   ```
-5. **Set webhook**:
-   ```bash
-   cd ~/telegram-finance-bot
-   python3.11 -c "
-   from config import TELEGRAM_TOKEN, WEBHOOK_URL
-   import requests
-   url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={WEBHOOK_URL}/webhook/{TELEGRAM_TOKEN}'
-   print(requests.get(url).json())
-   "
-   ```
-6. **Keep alive (QUAN TRỌNG)**: Free tier web app sleep sau ~10 phút không traffic.
-   - Tạo task trên [cron-job.org](https://cron-job.org):
-     - URL: `https://yourusername.pythonanywhere.com/keepalive`
-     - Interval: **Every 3 minutes**
-   - Endpoint `/keepalive` tự động: touch database, check scheduler, cleanup stale state.
-   - Kiểm tra sức khỏe: `https://yourusername.pythonanywhere.com/health`
-
-7. **Webhook recovery**: Nếu bot không phản hồi, re-register webhook:
-   ```bash
-   curl -X POST https://yourusername.pythonanywhere.com/webhook/register
-   ```
-   Kiểm tra trạng thái webhook:
-   ```bash
-   curl https://yourusername.pythonanywhere.com/webhook/info
-   ```
-
-### Bot Mode: Polling vs Webhook
-
-| Mode | Configuration | Use Case |
-|------|--------------|----------|
-| Polling | No webhook set, `bot.py` runs `bot.polling()` | Local dev |
-| Webhook | Set webhook URL to `https://yourdomain.com/webhook/<token>` | Production (PythonAnywhere, Render, etc.) |
-
-When using webhook mode, the bot is driven by Flask receiving Telegram updates via `POST /webhook/<token>`. The `bot.py` handler `route_webhook()` processes the incoming JSON. The token mismatch check prevents unauthorized calls.
-
----
-
-## Extending the Project
-
-### Adding a New Bot Command
-1. Add handler function in `bot.py` (pattern: `def cmd_mycommand(message):`)
-2. Register it: `@bot.message_handler(commands=['mycommand'])`
-3. Add help text in `cmd_help()` under the appropriate section
-
-### Adding a New Database Table
-1. Add `CREATE TABLE` in `database.py:init_db()`
-2. Add CRUD functions following existing patterns (cursor.execute/commit/fetch)
-3. Add any business logic in a new module or existing `finance_logic.py`
-
-### Adding a New Chart to Dashboard
-1. Add data endpoint in `app.py` if existing APIs don't cover it
-2. Add canvas element in the relevant template (e.g., `dashboard.html`)
-3. Add Chart.js config in `static/js/chart.js`
-
-### Adding a New Bank Account
-1. Add the bank name to the inline keyboard list in `bot.py` (in the bank selection callback)
-2. Add a field for it in `get_balance()` in `finance_logic.py`
-3. The rest works automatically (transactions are tagged by bank)
+| numpy | 2.1.2 | Monte Carlo math |
+| matplotlib | 3.9.2 | Chart generation |
+| google-generativeai | — | Gemini AI API (LLM parser) |
+| requests | 2.32.3 | HTTP calls |
+| Chart.js | CDN | Client-side charts |
 
 ---
 
