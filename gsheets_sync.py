@@ -306,3 +306,21 @@ def update_capitalized_asset_value(asset_name, new_remaining, new_depreciated_so
         msg = f"Lỗi update Capitalized Assets: {e}"
         print(f"[GSheets] {msg}")
         return False, msg
+
+
+def refresh_summary_sheet():
+    """
+    Cập nhật lại toàn bộ công thức trong tab Summary trên Google Sheets.
+    Gọi hàm này khi cần đồng bộ lại công thức (ví dụ sau khi sửa logic).
+    """
+    client, auth_err = get_gspread_client()
+    if not client:
+        return False, auth_err
+    try:
+        from setup_gsheets import setup_summary_sheet
+        setup_summary_sheet(client)
+        return True, None
+    except Exception as e:
+        msg = f"Lỗi refresh Summary sheet: {e}"
+        print(f"[GSheets] {msg}")
+        return False, msg

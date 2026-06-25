@@ -43,47 +43,100 @@ def apply_currency_formatting(worksheet, amount_col_letter, num_data_rows=1000):
     except Exception as e:
         print(f"  ⚠️ Could not apply currency formatting: {e}")
 
+def _balance_formula(bank_row_ref):
+    """
+    Tạo công thức tính số dư cho 1 tài khoản:
+      = Tổng từ Expenses (thu + chi)
+      + Tổng nhận từ Transfers (cột To = bank → +amount)
+      - Tổng gửi đi Transfers (cột From = bank → -amount)
+    """
+    return (
+        f'=SUMIF(Expenses!E:E, {bank_row_ref}, Expenses!B:B)'
+        f'+SUMIF(Transfers!D:D, {bank_row_ref}, Transfers!B:B)'
+        f'-SUMIF(Transfers!C:C, {bank_row_ref}, Transfers!B:B)'
+    )
+
+
 def setup_summary_sheet(client):
     print("\n--- Setup Summary Sheet ---")
     try:
         sheet = client.open(EXPENSE_SHEET_NAME)
         try:
             ws_summary = sheet.worksheet("Summary")
-            print("Tab 'Summary' already exists.")
+            print("Tab 'Summary' already exists — updating formulas.")
         except gspread.exceptions.WorksheetNotFound:
             ws_summary = sheet.add_worksheet(title="Summary", rows="100", cols="20")
             print("Created tab 'Summary'.")
 
+        # ── Đảm bảo tab Transfers tồn tại trước khi viết công thức ──
+        try:
+            sheet.worksheet("Transfers")
+        except gspread.exceptions.WorksheetNotFound:
+            ws_transfers = sheet.add_worksheet(title="Transfers", rows=1000, cols=6)
+            ws_transfers.append_row(
+                ["Date", "Amount", "From", "To", "Description"],
+                value_input_option="USER_ENTERED",
+            )
+            print("  Auto-created tab 'Transfers' (needed for Summary formulas).")
+
+        # ── Bank Balances (bao gồm MOMO + tính cả Transfers) ──
+        banks = ["VCB", "ACB", "HDBANK", "CASH", "MOMO"]
+        bank_rows = [[b] for b in banks]
+        last_bank_row = 2 + len(banks) - 1  # Row 6 (A2..A6)
+        balance_formulas = [[_balance_formula(f"A{2+i}")] for i in range(len(banks))]
+
         updates = [
+            # Header
             {"range": "A1:B1", "values": [["Bank Account", "Balance"]]},
-            {"range": "A2:A5", "values": [["VCB"], ["ACB"], ["HDBANK"], ["CASH"]]},
-            {"range": "B2:B5", "values": [
-                ['=SUMIF(Expenses!E:E, A2, Expenses!B:B)'],
-                ['=SUMIF(Expenses!E:E, A3, Expenses!B:B)'],
-                ['=SUMIF(Expenses!E:E, A4, Expenses!B:B)'],
-                ['=SUMIF(Expenses!E:E, A5, Expenses!B:B)']
+            # Bank names (A2:A6)
+            {"range": f"A2:A{last_bank_row}", "values": bank_rows},
+            # Balance formulas (B2:B6) — bao gồm Expenses + Transfers
+            {"range": f"B2:B{last_bank_row}", "values": balance_formulas},
+            # Total balance row
+            {"range": f"A{last_bank_row+1}:B{last_bank_row+1}", "values": [
+                ["TOTAL BALANCE", f"=SUM(B2:B{last_bank_row})"]
             ]},
-            {"range": "A6:B6", "values": [["TOTAL BALANCE", "=SUM(B2:B5)"]]},
+
+            # ── Category Breakdown ──
             {"range": "D1:E1", "values": [["Category", "Total Expense (All time)"]]},
-            {"range": "D2:D7", "values": [["food"], ["transport"], ["bill"], ["shopping"], ["health"], ["entertainment"]]},
+            {"range": "D2:D7", "values": [
+                ["food"], ["transport"], ["bill"], ["shopping"], ["health"], ["entertainment"]
+            ]},
             {"range": "E2:E7", "values": [
                 ['=SUMIFS(Expenses!B:B, Expenses!C:C, D2, Expenses!B:B, "<0")'],
                 ['=SUMIFS(Expenses!B:B, Expenses!C:C, D3, Expenses!B:B, "<0")'],
                 ['=SUMIFS(Expenses!B:B, Expenses!C:C, D4, Expenses!B:B, "<0")'],
                 ['=SUMIFS(Expenses!B:B, Expenses!C:C, D5, Expenses!B:B, "<0")'],
                 ['=SUMIFS(Expenses!B:B, Expenses!C:C, D6, Expenses!B:B, "<0")'],
-                ['=SUMIFS(Expenses!B:B, Expenses!C:C, D7, Expenses!B:B, "<0")']
-            ]}
+                ['=SUMIFS(Expenses!B:B, Expenses!C:C, D7, Expenses!B:B, "<0")'],
+            ]},
+
+            # ── Monthly Summary (Thu / Chi / Net) ──
+            {"range": "G1:H1", "values": [["Tổng Kết Tháng", ""]]},
+            {"range": "G2:H2", "values": [
+                ["Tổng Thu Nhập",
+                 '=SUMPRODUCT((Expenses!B:B>0)*(Expenses!C:C<>"transfer")*(Expenses!C:C<>"initial_balance")*Expenses!B:B)']
+            ]},
+            {"range": "G3:H3", "values": [
+                ["Tổng Chi Tiêu",
+                 '=SUMPRODUCT((Expenses!B:B<0)*(Expenses!C:C<>"transfer")*(Expenses!C:C<>"initial_balance")*Expenses!B:B)']
+            ]},
+            {"range": "G4:H4", "values": [["Net (Thu - Chi)", "=H2+H3"]]},
         ]
         ws_summary.batch_update(updates, value_input_option="USER_ENTERED")
 
+        # ── Formatting ──
         try:
+            total_row = f"A{last_bank_row+1}:B{last_bank_row+1}"
             format_cell_range(ws_summary, "A1:B1", HEADER_FORMAT)
-            format_cell_range(ws_summary, "A6:B6", HEADER_FORMAT)
+            format_cell_range(ws_summary, total_row, HEADER_FORMAT)
             format_cell_range(ws_summary, "D1:E1", HEADER_FORMAT)
-            
-            format_cell_range(ws_summary, "B2:B6", CURRENCY_FORMAT)
+            format_cell_range(ws_summary, "G1:H1", HEADER_FORMAT)
+            format_cell_range(ws_summary, "G4:H4", HEADER_FORMAT)
+
+            format_cell_range(ws_summary, f"B2:B{last_bank_row+1}", CURRENCY_FORMAT)
             format_cell_range(ws_summary, "E2:E7", CURRENCY_FORMAT)
+            format_cell_range(ws_summary, "H2:H4", CURRENCY_FORMAT)
             print("  ✅ Summary formatting applied.")
         except Exception as e:
             print(f"  ⚠️ Could not apply summary formatting: {e}")

@@ -15,7 +15,7 @@ from database import (
     get_transactions, add_asset, save_state, load_state, clear_state, get_db
 )
 from asset_manager import get_asset_summary, liquidate_asset
-from finance_logic import get_balance, get_monthly_summary, get_category_breakdown
+from finance_logic import get_balance, get_monthly_summary, get_category_breakdown, get_all_bank_balances
 from gsheets_reader import sync_all_from_sheets, read_expenses_from_sheet, read_portfolio_from_sheet
 from gsheets_sync import sync_expense_to_gsheet, sync_transfer_to_gsheet
 from simulation import run_monte_carlo, generate_projection_chart
@@ -265,17 +265,37 @@ def cmd_balance(message: Message):
 def cmd_report(message: Message):
     if not is_admin(message.from_user.id):
         return
+    uid = message.from_user.id
     summary = get_monthly_summary()
     cats = get_category_breakdown()
-    lines = [f"Report - {datetime.now().strftime('%Y-%m')}",
-             f"Income: +{summary['income']:,.0f}",
-             f"Expense: -{summary['expense']:,.0f}",
-             f"Net: {summary['net']:,.0f}", ""]
+    balances, total_balance = get_all_bank_balances()
+
+    month_label = datetime.now().strftime('%Y-%m')
+    lines = [
+        f"📊 *BÁO CÁO THÁNG — {month_label}*",
+        "─────────────────────────────",
+        "💳 *SỐ DƯ TỪNG TÀI KHOẢN:*",
+    ]
+    if balances:
+        for bank, bal in balances.items():
+            lines.append(f"  {bank}: `{bal:+,.0f}` VND")
+    else:
+        lines.append("  (Chưa có giao dịch)")
+
+    lines.append("")
+    lines.append(f"💰 *TỔNG SỐ DƯ: `{total_balance:+,.0f}` VND*")
+    lines.append("─────────────────────────────")
+    lines.append(f"📈 Thu nhập tháng:  `+{summary['income']:,.0f}`")
+    lines.append(f"📉 Chi tiêu tháng:  `-{summary['expense']:,.0f}`")
+    lines.append(f"📊 Net (Thu - Chi): `{summary['net']:+,.0f}`")
+
     if cats:
-        lines.append("Top spending:")
+        lines.append("")
+        lines.append("🏆 *TOP CHI TIÊU:*")
         for c in cats[:5]:
-            lines.append(f"  {c['category']}: {c['total']:,.0f}")
-    bot.reply_to(message, "\n".join(lines))
+            lines.append(f"  {c['category']}: `{c['total']:,.0f}`")
+
+    bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
 
 @bot.message_handler(commands=["asset"])
 def cmd_asset(message: Message):
