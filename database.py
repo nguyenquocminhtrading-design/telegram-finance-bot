@@ -213,6 +213,48 @@ def delete_transaction(tid):
     conn.close()
 
 
+@db_retry()
+def clear_all_transactions(user_id=0):
+    """Xóa toàn bộ giao dịch của một user để phục vụ full resync."""
+    conn = get_db()
+    conn.execute("DELETE FROM transactions WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+@db_retry()
+def clear_all_assets(user_id=0):
+    """Xóa toàn bộ asset và log liên quan của một user."""
+    conn = get_db()
+    asset_ids = [
+        row["id"]
+        for row in conn.execute("SELECT id FROM assets WHERE user_id = ?", (user_id,)).fetchall()
+    ]
+    if asset_ids:
+        placeholders = ",".join("?" for _ in asset_ids)
+        conn.execute(f"DELETE FROM depreciation_log WHERE asset_id IN ({placeholders})", asset_ids)
+    conn.execute("DELETE FROM assets WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+@db_retry()
+def clear_all_finance_data(user_id=0):
+    """Xóa toàn bộ dữ liệu giao dịch/tài sản của một user."""
+    conn = get_db()
+    asset_ids = [
+        row["id"]
+        for row in conn.execute("SELECT id FROM assets WHERE user_id = ?", (user_id,)).fetchall()
+    ]
+    if asset_ids:
+        placeholders = ",".join("?" for _ in asset_ids)
+        conn.execute(f"DELETE FROM depreciation_log WHERE asset_id IN ({placeholders})", asset_ids)
+    conn.execute("DELETE FROM assets WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM transactions WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
 def count_transactions(user_id, category=None, start_date=None, end_date=None):
     conn = get_db()
     params = [user_id]

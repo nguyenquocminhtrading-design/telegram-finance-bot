@@ -4,7 +4,7 @@ from google.oauth2.service_account import Credentials
 from datetime import date
 
 from config import GOOGLE_CREDENTIALS_FILE, EXPENSE_SHEET_NAME, PORTFOLIO_SHEET_NAME
-from database import add_transaction, add_asset, get_db
+from database import add_transaction, add_transfer, add_asset, get_db, clear_all_finance_data
 
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
@@ -71,6 +71,30 @@ def read_portfolio_from_sheet():
     except Exception as e:
         return None, f"Error reading Portfolio sheet: {e}"
 
+def read_transfers_from_sheet():
+    client, err = get_gspread_client()
+    if not client:
+        return None, err
+    try:
+        sheet = client.open(EXPENSE_SHEET_NAME)
+        try:
+            worksheet = sheet.worksheet("Transfers")
+        except gspread.exceptions.WorksheetNotFound:
+            return [], None
+        rows = worksheet.get_all_values()
+        if len(rows) < 2:
+            return [], None
+        headers = rows[0]
+        data = []
+        for row in rows[1:]:
+            if not any(row):
+                continue
+            record = dict(zip(headers, row))
+            data.append(record)
+        return data, None
+    except Exception as e:
+        return None, f"Error reading Transfers sheet: {e}"
+
 def sync_expenses_to_sqlite(data, user_id=0):
     imported = 0
     skipped = 0
@@ -126,8 +150,52 @@ def sync_portfolio_to_sqlite(data, user_id=0):
             skipped += 1
     return imported, skipped
 
+
+def _transfer_exists(user_id, txn_date, amount, from_bank, to_bank, description):
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT bank_account, amount
+           FROM transactions
+           WHERE user_id = ?
+             AND category = 'transfer'
+             AND transaction_date = ?
+             AND description = ?
+             AND ABS(amount) = ?""",
+        (user_id, txn_date, description, abs(amount)),
+    ).fetchall()
+    conn.close()
+    if len(rows) < 2:
+        return False
+    bank_amounts = {(r["bank_account"], round(abs(r["amount"]), 2)) for r in rows}
+    return (from_bank, round(abs(amount), 2)) in bank_amounts and (to_bank, round(abs(amount), 2)) in bank_amounts
+
+
+def sync_transfers_to_sqlite(data, user_id=0):
+    imported = 0
+    skipped = 0
+    for row in data:
+        try:
+            txn_date = row.get("Date", date.today().isoformat())
+            amount_str = row.get("Amount", "0").replace(",", "").replace(" ", "")
+            amount = abs(float(amount_str)) if amount_str else 0
+            from_bank = row.get("From", "").strip().upper()
+            to_bank = row.get("To", "").strip().upper()
+            desc = row.get("Description", "").strip()
+            if not amount or not from_bank or not to_bank or not desc:
+                skipped += 1
+                continue
+            if _transfer_exists(user_id, txn_date, amount, from_bank, to_bank, desc):
+                skipped += 1
+                continue
+            add_transfer(user_id, amount, from_bank, to_bank, desc, txn_date)
+            imported += 1
+        except (ValueError, KeyError, AttributeError):
+            skipped += 1
+    return imported, skipped
+
 def sync_all_from_sheets(user_id=0):
     results = {"expenses": {"imported": 0, "skipped": 0, "error": None},
+               "transfers": {"imported": 0, "skipped": 0, "error": None},
                "portfolio": {"imported": 0, "skipped": 0, "error": None}}
 
     exp_data, err = read_expenses_from_sheet()
@@ -138,6 +206,14 @@ def sync_all_from_sheets(user_id=0):
         results["expenses"]["imported"] = imp
         results["expenses"]["skipped"] = skip
 
+    transfer_data, err = read_transfers_from_sheet()
+    if err:
+        results["transfers"]["error"] = err
+    elif transfer_data is not None:
+        imp, skip = sync_transfers_to_sqlite(transfer_data, user_id)
+        results["transfers"]["imported"] = imp
+        results["transfers"]["skipped"] = skip
+
     port_data, err = read_portfolio_from_sheet()
     if err:
         results["portfolio"]["error"] = err
@@ -147,3 +223,9 @@ def sync_all_from_sheets(user_id=0):
         results["portfolio"]["skipped"] = skip
 
     return results
+
+
+def full_sync_from_sheets(user_id=0):
+    """Xóa dữ liệu SQLite của user rồi import lại toàn bộ từ Google Sheets."""
+    clear_all_finance_data(user_id)
+    return sync_all_from_sheets(user_id)

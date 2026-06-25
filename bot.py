@@ -16,7 +16,7 @@ from database import (
 )
 from asset_manager import get_asset_summary, liquidate_asset
 from finance_logic import get_balance, get_monthly_summary, get_category_breakdown, get_all_bank_balances
-from gsheets_reader import sync_all_from_sheets, read_expenses_from_sheet, read_portfolio_from_sheet
+from gsheets_reader import sync_all_from_sheets, full_sync_from_sheets, read_expenses_from_sheet, read_portfolio_from_sheet
 from gsheets_sync import sync_expense_to_gsheet, sync_transfer_to_gsheet
 from simulation import run_monte_carlo, generate_projection_chart
 from nav_fetcher import fetch_nav_from_vnsignal, update_asset_nav, refresh_all_assets
@@ -205,6 +205,7 @@ def cmd_help(message: Message):
         "  `/project [monthly] [months]` — Monte Carlo projection\n"
         "  `/export` — xuất file Excel\n"
         "  `/sync` — đồng bộ từ Google Sheets\n"
+        "  `/fullsync` — xóa SQLite và import lại từ Google Sheets\n"
         "  `/web` — link Web Dashboard\n\n"
         "🔧 *Debug:*\n"
         "  `/ping` `/dbcheck` `/gscheck` `/envcheck` `/logs` `/navtest`\n\n"
@@ -236,11 +237,13 @@ def cmd_setbalance(message: Message):
 def cmd_bankbalance(message: Message):
     if not is_admin(message.from_user.id):
         return
+    uid = message.from_user.id
     conn = get_db()
     rows = conn.execute(
         "SELECT bank_account, SUM(amount) as balance FROM transactions"
-        " WHERE bank_account IS NOT NULL AND bank_account != ''"
+        " WHERE user_id = ? AND bank_account IS NOT NULL AND bank_account != ''"
         " GROUP BY bank_account ORDER BY balance DESC"
+        , (uid,)
     ).fetchall()
     conn.close()
     if not rows:
@@ -258,17 +261,23 @@ def cmd_bankbalance(message: Message):
 def cmd_balance(message: Message):
     if not is_admin(message.from_user.id):
         return
-    bal = get_balance()
-    bot.reply_to(message, f"Balance: **{bal:,.0f} VND**", parse_mode="Markdown")
+    uid = message.from_user.id
+    balances, total = get_all_bank_balances(uid)
+    lines = ["💰 *SỐ DƯ TÀI KHOẢN:*", ""]
+    for bank, bal in balances.items():
+        lines.append(f"  {bank}: `{bal:+,.0f}` VND")
+    lines.append("")
+    lines.append(f"  *TOTAL: `{total:+,.0f}` VND*")
+    bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
 
 @bot.message_handler(commands=["report"])
 def cmd_report(message: Message):
     if not is_admin(message.from_user.id):
         return
     uid = message.from_user.id
-    summary = get_monthly_summary()
-    cats = get_category_breakdown()
-    balances, total_balance = get_all_bank_balances()
+    summary = get_monthly_summary(uid)
+    cats = get_category_breakdown(uid)
+    balances, total_balance = get_all_bank_balances(uid)
 
     month_label = datetime.now().strftime('%Y-%m')
     lines = [
@@ -367,16 +376,52 @@ def cmd_refresh(message: Message):
 def cmd_sync(message: Message):
     if not is_admin(message.from_user.id):
         return
+    uid = message.from_user.id
     msg = bot.reply_to(message, "Syncing from Google Sheets...")
-    results = sync_all_from_sheets()
+    results = sync_all_from_sheets(uid)
     e = results["expenses"]
+    t = results["transfers"]
     p = results["portfolio"]
     bot.edit_message_text(
         f"✅ *Sync complete*\n"
         f"Expenses: {e['imported']} imported, {e['skipped']} skipped\n"
+        f"Transfers: {t['imported']} imported, {t['skipped']} skipped\n"
         f"Portfolio: {p['imported']} imported, {p['skipped']} skipped",
         msg.chat.id, msg.message_id, parse_mode="Markdown"
     )
+
+@bot.message_handler(commands=["fullsync"])
+def cmd_fullsync(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    save_state(message.from_user.id, {
+        "pending_fullsync_confirm": {
+            "requested_at": datetime.now().isoformat()
+        }
+    })
+    bot.reply_to(
+        message,
+        "⚠️ Full sync sẽ xóa toàn bộ dữ liệu SQLite của bạn rồi import lại từ Google Sheets.\n"
+        "Gõ `yes` để xác nhận, hoặc `no` để hủy.",
+        parse_mode="Markdown"
+    )
+    return
+    msg = bot.reply_to(
+        message,
+        "Full sync starting...\n"
+        "This will clear SQLite data for your user and import again from Google Sheets."
+    )
+    results = full_sync_from_sheets(message.from_user.id)
+    e = results["expenses"]
+    t = results["transfers"]
+    p = results["portfolio"]
+    lines = [
+        "✅ *Full sync complete*",
+        f"Expenses: {e['imported']} imported, {e['skipped']} skipped",
+        f"Transfers: {t['imported']} imported, {t['skipped']} skipped",
+        f"Portfolio: {p['imported']} imported, {p['skipped']} skipped",
+    ]
+    bot.edit_message_text("\n".join(lines), msg.chat.id, msg.message_id, parse_mode="Markdown")
 
 @bot.message_handler(commands=["project", "montecarlo"])
 def cmd_project(message: Message):
@@ -430,8 +475,9 @@ def cmd_liquidate(message: Message):
 def cmd_export(message: Message):
     if not is_admin(message.from_user.id):
         return
+    uid = message.from_user.id
     bot.reply_to(message, "Generating Excel...")
-    txs = get_transactions(0, 10000, 0)
+    txs = get_transactions(uid, 10000, 0)
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Transactions"
@@ -613,6 +659,32 @@ def handle_main_message(message: Message):
     text = message.text.strip()
     loaded = load_state(uid)
 
+    # --- State: pending_fullsync_confirm ---
+    if "pending_fullsync_confirm" in loaded:
+        affirm = text.lower() in ("yes", "y", "co", "có", "ok", "oke", "dong y", "đồng ý")
+        if not affirm:
+            clear_state(uid)
+            bot.reply_to(message, "Đã hủy full sync.")
+            return
+        clear_state(uid)
+        msg = bot.reply_to(message, "Đang full sync, chờ mình chút nhé...")
+        try:
+            results = full_sync_from_sheets(uid)
+            e = results["expenses"]
+            t = results["transfers"]
+            p = results["portfolio"]
+            lines = [
+                "✅ *Full sync complete*",
+                f"Expenses: {e['imported']} imported, {e['skipped']} skipped",
+                f"Transfers: {t['imported']} imported, {t['skipped']} skipped",
+                f"Portfolio: {p['imported']} imported, {p['skipped']} skipped",
+            ]
+            bot.edit_message_text("\n".join(lines), msg.chat.id, msg.message_id, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"fullsync error: {e}")
+            bot.edit_message_text(f"❌ Full sync failed: {e}", msg.chat.id, msg.message_id)
+        return
+
     # --- State: pending_bank (user trả lời tên bank) ---
     if "pending_bank" in loaded:
         bank = resolve_bank_text(text)
@@ -624,7 +696,7 @@ def handle_main_message(message: Message):
                               is_asset=0, bank_account=bank)
         clear_state(uid)
         after_tx_sync(uid, state["amount"], state["category"], state["desc"], bank, tid)
-        bal = get_balance()
+        bal = get_balance(uid)
         text_reply = f"✅ {state['amount']:+,.0f} | {state['desc']} ({bank}) | Balance: {bal:,.0f}"
         # Hỏi vốn hóa nếu chi tiêu ≥ 200,000 VND (threshold hợp lý)
         if state["amount"] < -200_000:
@@ -732,7 +804,7 @@ def handle_main_message(message: Message):
     if bank:
         tid = add_transaction(uid, amount, cat, desc, is_asset=0, bank_account=bank)
         after_tx_sync(uid, amount, cat, desc, bank, tid)
-        bal = get_balance()
+        bal = get_balance(uid)
         text_reply = f"✅ {amount:+,.0f} | {desc} ({bank}) | Balance: {bal:,.0f}"
         # Hỏi vốn hóa chỉ khi là chi tiêu ≥ 200,000 VND (KHÔNG phải transfer)
         if amount < -200_000:

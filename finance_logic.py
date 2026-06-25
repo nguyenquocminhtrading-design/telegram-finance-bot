@@ -1,6 +1,8 @@
 from datetime import date, timedelta
 from database import get_db
 
+VALID_BANKS = ["VCB", "ACB", "HDBANK", "CASH", "MOMO"]
+
 
 def get_balance(user_id=0):
     conn = get_db()
@@ -13,7 +15,7 @@ def get_balance(user_id=0):
 
 
 def get_all_bank_balances(user_id=0):
-    """Trả về dict {bank: balance} và tổng balance từ tất cả giao dịch (bao gồm transfer)."""
+    """Trả về dict {bank: balance} theo thứ tự chuẩn và tổng balance."""
     conn = get_db()
     rows = conn.execute(
         "SELECT bank_account, SUM(amount) as balance FROM transactions"
@@ -24,8 +26,9 @@ def get_all_bank_balances(user_id=0):
     ).fetchall()
     conn.close()
     balances = {r["bank_account"]: round(r["balance"], 2) for r in rows}
-    total = round(sum(balances.values()), 2)
-    return balances, total
+    ordered = {bank: round(balances.get(bank, 0.0), 2) for bank in VALID_BANKS}
+    total = round(sum(ordered.values()), 2)
+    return ordered, total
 
 
 def get_monthly_summary(user_id=0, year=None, month=None):
