@@ -58,8 +58,7 @@ CATEGORY_KEYWORDS = {
 }
 
 AMOUNT_PATTERNS = [
-    (r'(\d+\.?\d*)\s*tr', lambda m: float(m.group(1)) * 1_000_000),
-    (r'(\d+\.?\d*)\s*triệu', lambda m: float(m.group(1)) * 1_000_000),
+    (r'(\d+\.?\d*)\s*tr(?:iệu)?', lambda m: float(m.group(1)) * 1_000_000),
     (r'(\d+\.?\d*)\s*k', lambda m: float(m.group(1)) * 1000),
     (r'(\d+\.?\d*)\s*nghìn', lambda m: float(m.group(1)) * 1000),
     (r'(\d+)[\s,]*\.?\s*đ', lambda m: float(m.group(1).replace(',', ''))),
@@ -67,33 +66,38 @@ AMOUNT_PATTERNS = [
     (r'(\d+)', lambda m: float(m.group(1))),
 ]
 
+# Matches: "chuyển 2tr từ VCB sang ACB" / "chuyển 500k từ acb vào momo"
 TRANSFER_PATTERN = re.compile(
-    r'(?:chuyển|rút|nạp|gửi|chuyển.khoản)\s+'
-    r'(\d+[\d,.,kK,tT,rR,mM]*)\s*'
-    r'(?:từ|tư|ở)\s*(\w+)\s*'
-    r'(?:sang|đến|vào|đi|qua|cho)\s*(\w+)',
-    re.IGNORECASE
+    r'(?:chuy[eê]n|r[uú]t|n[aạ]p|g[uử]i|chuy[eê]n\s*kho[aả]n)\s+'
+    r'([\d]+(?:[.,][\d]+)?(?:\s*(?:tr(?:i[eê]u)?|k|nghìn))?)\s*'
+    r'(?:t[uừừ]|[oở])\s*([\w]+)\s+'
+    r'(?:sang|[dđ][eế]n|v[aà]o|[dđ]i|qua|cho)\s*([\w]+)',
+    re.IGNORECASE | re.UNICODE,
 )
 
+# Matches: "rút 2tr từ VCB" (destination defaults to CASH)
 TRANSFER_SHORT_PATTERN = re.compile(
-    r'(?:rút|nạp)\s+(\d+[\d,.,kK,tT,rR,mM]*)\s*'
-    r'(?:từ|tư|ở)\s*(\w+)',
-    re.IGNORECASE
+    r'(?:r[uú]t|n[aạ]p)\s+'
+    r'([\d]+(?:[.,][\d]+)?(?:\s*(?:tr(?:i[eê]u)?|k|nghìn))?)\s*'
+    r'(?:t[uừừ]|[oở])\s*([\w]+)',
+    re.IGNORECASE | re.UNICODE,
 )
 
 
 def resolve_bank(text):
-    text = text.upper().strip()
+    text_stripped = text.upper().strip()
+    text_lower = text.lower().strip()
     for bank, keywords in BANK_KEYWORDS.items():
         for kw in keywords:
-            if kw in text.lower() or (len(text) <= 5 and bank[:len(text)] == text):
+            if kw in text_lower or text_stripped == bank:
                 return bank
-    return text
+    # If it's a short known bank name return as-is uppercase
+    return text_stripped if text_stripped else None
 
 
 def parse_amount_local(text):
     for pattern, func in AMOUNT_PATTERNS:
-        m = re.search(pattern, text)
+        m = re.search(pattern, text, re.IGNORECASE | re.UNICODE)
         if m:
             return func(m)
     return None
@@ -114,40 +118,38 @@ def parse_transaction_local(text):
         "from_local": True,
     }
 
-    # 1. Detect TRANSFER
+    # 1. Detect full TRANSFER: "chuyển X từ A sang B"
     m = TRANSFER_PATTERN.search(text)
     if m:
         result["action"] = "transfer"
         result["amount"] = parse_amount_local(m.group(1))
-        b1 = m.group(2).upper()
-        b2 = m.group(3).upper()
-        result["from_bank"] = resolve_bank(b1)
-        result["to_bank"] = resolve_bank(b2)
+        result["from_bank"] = resolve_bank(m.group(2))
+        result["to_bank"] = resolve_bank(m.group(3))
         result["description"] = f"Chuyển từ {result['from_bank']} sang {result['to_bank']}"
-        logger.info(f"Local: detected transfer {result['from_bank']} -> {result['to_bank']}")
+        logger.info(f"Local: detected transfer {result['from_bank']} -> {result['to_bank']} amount={result['amount']}")
         return result
 
+    # 2. Detect short TRANSFER: "rút X từ A" → to_bank defaults to CASH
     m = TRANSFER_SHORT_PATTERN.search(text)
     if m:
         result["action"] = "transfer"
         result["amount"] = parse_amount_local(m.group(1))
-        b = m.group(2).upper()
-        result["from_bank"] = resolve_bank(b)
+        result["from_bank"] = resolve_bank(m.group(2))
         result["to_bank"] = "CASH"
-        result["description"] = f"Rút từ {result['from_bank']}"
-        logger.info(f"Local: detected withdrawal from {result['from_bank']}")
+        result["description"] = f"Rút từ {result['from_bank']} ra tiền mặt"
+        logger.info(f"Local: detected withdrawal from {result['from_bank']}, amount={result['amount']}")
         return result
 
-    # 2. Extract amount
+    # 3. Extract amount
     result["amount"] = parse_amount_local(text)
 
-    # 3. Detect INCOME
+    # 4. Detect INCOME
     income_score = sum(1 for kw in ACTION_KEYWORDS["income"] if kw in text_lower)
     expense_score = sum(1 for kw in ["mua", "ăn", "đi", "trả", "đóng"] if kw in text_lower)
     if income_score > 0 and income_score >= expense_score:
         result["action"] = "income"
 
-    # 4. Detect bank
+    # 5. Detect bank
     for bank, keywords in BANK_KEYWORDS.items():
         for kw in keywords:
             if kw in text_lower:
@@ -156,7 +158,7 @@ def parse_transaction_local(text):
         if result["bank"]:
             break
 
-    # 5. Category by keyword scoring
+    # 6. Category by keyword scoring
     scores = {}
     for cat, keywords in CATEGORY_KEYWORDS.items():
         score = sum(1 for kw in keywords if kw in text_lower)
@@ -167,12 +169,12 @@ def parse_transaction_local(text):
         if scores[best_cat] >= 1:
             result["category"] = best_cat
 
-    # 6. Clean description: remove amount, bank words
+    # 7. Clean description: remove amount & bank words
     desc = text_original
     for pat, _ in AMOUNT_PATTERNS:
-        desc = re.sub(pat, '', desc)
-    for bank_keywords in BANK_KEYWORDS.values():
-        for kw in bank_keywords:
+        desc = re.sub(pat, '', desc, flags=re.IGNORECASE | re.UNICODE)
+    for bank_kws in BANK_KEYWORDS.values():
+        for kw in bank_kws:
             desc = re.sub(re.escape(kw), '', desc, flags=re.IGNORECASE)
     desc = re.sub(r'\s+', ' ', desc).strip()
     if desc:
