@@ -1,6 +1,27 @@
 import sqlite3
+import json
+import time
+import functools
 from datetime import datetime, date
 from config import DATABASE_PATH
+
+
+def db_retry(max_retries=3, delay=0.3):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except sqlite3.OperationalError as e:
+                    if "database is locked" not in str(e):
+                        raise
+                    if attempt < max_retries - 1:
+                        time.sleep(delay * (2 ** attempt))
+                        continue
+                    raise
+        return wrapper
+    return decorator
 
 
 def get_db():
@@ -74,6 +95,7 @@ def init_db():
     conn.close()
 
 
+@db_retry()
 def add_transaction(user_id, amount, category, description, transaction_date=None, is_asset=0, bank_account=''):
     conn = get_db()
     if transaction_date is None:
@@ -115,6 +137,7 @@ def get_transaction_by_id(tid):
     return dict(row) if row else None
 
 
+@db_retry()
 def update_transaction(tid, amount, category, description, transaction_date, bank_account=None):
     conn = get_db()
     
@@ -132,6 +155,7 @@ def update_transaction(tid, amount, category, description, transaction_date, ban
     conn.close()
 
 
+@db_retry()
 def delete_transaction(tid):
     conn = get_db()
     conn.execute("DELETE FROM transactions WHERE id = ?", (tid,))
@@ -166,6 +190,7 @@ def get_categories(user_id):
 
 # ------- Asset CRUD -------
 
+@db_retry()
 def add_asset(user_id, transaction_id, name, original_value, depreciation_months, start_date=None):
     if start_date is None:
         start_date = date.today().isoformat()
@@ -199,6 +224,7 @@ def get_asset_by_id(aid):
     return dict(row) if row else None
 
 
+@db_retry()
 def update_asset_value(aid, new_value):
     conn = get_db()
     conn.execute("UPDATE assets SET current_value = ? WHERE id = ?", (new_value, aid))
@@ -206,6 +232,7 @@ def update_asset_value(aid, new_value):
     conn.close()
 
 
+@db_retry()
 def deactivate_asset(aid):
     conn = get_db()
     conn.execute("UPDATE assets SET is_active = 0 WHERE id = ?", (aid,))
@@ -247,6 +274,53 @@ def set_setting(key, value):
     conn = get_db()
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value)
+    )
+    conn.commit()
+    conn.close()
+
+
+# ------- User State (SQLite-backed, survives restart) -------
+
+def save_state(user_id, data_dict):
+    conn = get_db()
+    for k, v in data_dict.items():
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            (f"state_{user_id}_{k}", json.dumps(v, ensure_ascii=False))
+        )
+    conn.commit()
+    conn.close()
+
+
+def load_state(user_id):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT key, value FROM settings WHERE key LIKE ?", (f"state_{user_id}_%",)
+    ).fetchall()
+    conn.close()
+    state = {}
+    for r in rows:
+        k = r["key"].rsplit("_", 1)[-1]
+        try:
+            state[k] = json.loads(r["value"])
+        except (json.JSONDecodeError, ValueError):
+            state[k] = r["value"]
+    return state
+
+
+def clear_state(user_id):
+    conn = get_db()
+    conn.execute("DELETE FROM settings WHERE key LIKE ?", (f"state_{user_id}_%",))
+    conn.commit()
+    conn.close()
+
+
+def cleanup_stale_states(max_age_minutes=60):
+    conn = get_db()
+    conn.execute(
+        "DELETE FROM settings WHERE key LIKE 'state_%'"
+        " AND rowid NOT IN (SELECT rowid FROM settings"
+        "  WHERE key LIKE 'state_%' ORDER BY rowid DESC LIMIT 100)"
     )
     conn.commit()
     conn.close()

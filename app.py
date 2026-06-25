@@ -1,22 +1,33 @@
 import os
-import threading
+import sys
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import date, datetime
 
 import telebot
 from flask import Flask, request, jsonify, render_template, redirect, url_for, send_file
 import io
 import openpyxl
+import concurrent.futures
+import threading
 
 from config import TELEGRAM_TOKEN, WEBHOOK_URL, SECRET_KEY, DATABASE_PATH
 from database import init_db, get_transactions, get_transaction_by_id
 from database import update_transaction, delete_transaction, count_transactions
-from database import get_assets, get_categories, get_setting, set_setting
+from database import get_assets, get_categories, get_setting, set_setting, get_db
 from finance_logic import get_balance, get_monthly_summary, get_category_breakdown, get_cash_flow, get_full_report
 from asset_manager import get_asset_summary, run_monthly_depreciation
 from scheduler import create_scheduler
 
-logging.basicConfig(level=logging.INFO)
+log_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+file_handler = RotatingFileHandler("bot.log", maxBytes=5*1024*1024, backupCount=3)
+file_handler.setFormatter(log_formatter)
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(log_formatter)
+logging.getLogger().addHandler(file_handler)
+logging.getLogger().addHandler(console_handler)
+logging.getLogger().setLevel(logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -24,17 +35,12 @@ app.secret_key = SECRET_KEY
 
 init_db()
 
-# Run initial Sheets sync in background (non-blocking)
-def _initial_sync():
-    from gsheets_reader import sync_all_from_sheets
-    logger.info("Running initial sync from Google Sheets...")
-    results = sync_all_from_sheets()
-    logger.info(f"Initial sync done - Expenses: {results['expenses']['imported']} imported, Portfolio: {results['portfolio']['imported']} imported")
-
-threading.Thread(target=_initial_sync, daemon=True).start()
-
 scheduler = create_scheduler()
 scheduler.start()
+
+webhook_lock = threading.Lock()
+recent_update_ids = set()
+error_counter = 0
 
 
 @app.route("/")
@@ -184,27 +190,18 @@ def api_run_depreciation():
 
 @app.route("/api/export/excel", methods=["GET"])
 def api_export_excel():
-    txs = get_transactions(0, 10000, 0) # Export up to 10k transactions
-    
+    txs = get_transactions(0, 10000, 0)
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Transactions"
-    
-    # Headers
     headers = ["ID", "Date", "Amount", "Category", "Description", "Is Asset"]
     ws.append(headers)
-    
     for tx in txs:
         ws.append([
-            tx["id"],
-            tx["transaction_date"],
-            tx["amount"],
-            tx["category"],
-            tx["description"],
+            tx["id"], tx["transaction_date"], tx["amount"],
+            tx["category"], tx["description"],
             "Yes" if tx["is_asset"] else "No"
         ])
-    
-    # Auto-adjust column widths
     for col in ws.columns:
         max_length = 0
         column = col[0].column_letter
@@ -214,13 +211,10 @@ def api_export_excel():
                     max_length = len(str(cell.value))
             except:
                 pass
-        adjusted_width = (max_length + 2)
-        ws.column_dimensions[column].width = adjusted_width
-
+        ws.column_dimensions[column].width = max_length + 2
     excel_file = io.BytesIO()
     wb.save(excel_file)
     excel_file.seek(0)
-    
     return send_file(
         excel_file,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -233,13 +227,109 @@ def api_export_excel():
 def webhook(token):
     if token != TELEGRAM_TOKEN:
         return "Unauthorized", 403
-    from bot import bot
-    update = request.get_data(as_text=True)
+
+    raw = request.get_data(as_text=True)
     try:
-        bot.process_new_updates([telebot.types.Update.de_json(update)])
+        update = telebot.types.Update.de_json(raw)
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
+        logger.error(f"Webhook parse error: {e}")
+        return "Bad Request", 400
+
+    uid = update.update_id
+
+    if uid in recent_update_ids:
+        return "OK", 200
+
+    recent_update_ids.add(uid)
+    if len(recent_update_ids) > 500:
+        recent_update_ids.clear()
+
+    if not webhook_lock.acquire(timeout=12):
+        logger.warning(f"Webhook busy, dropping update {uid}")
+        return "retry", 429
+
+    from bot import bot
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            f = pool.submit(bot.process_new_updates, [update])
+            f.result(timeout=12)
+        logger.info(f"Webhook processed: update {uid}")
+        global error_counter
+        error_counter = 0
+    except concurrent.futures.TimeoutError:
+        logger.error(f"Webhook timeout: update {uid} > 12s")
+        error_counter += 1
+    except Exception as e:
+        logger.error(f"Webhook error: update {uid}: {e}", exc_info=True)
+        error_counter += 1
+    finally:
+        webhook_lock.release()
+
     return "OK", 200
+
+
+@app.route("/health")
+def health():
+    checks = {"status": "ok", "timestamp": datetime.now().isoformat()}
+    try:
+        conn = get_db()
+        conn.execute("SELECT 1").fetchone()
+        conn.close()
+        checks["database"] = "ok"
+    except Exception as e:
+        checks["database"] = str(e)
+        checks["status"] = "degraded"
+    checks["scheduler"] = "running" if scheduler.running else "stopped"
+    if not scheduler.running:
+        try:
+            scheduler.start()
+            checks["scheduler"] = "restarted"
+        except Exception as e:
+            checks["scheduler"] = f"failed: {e}"
+            checks["status"] = "degraded"
+    checks["error_counter"] = error_counter
+    status_code = 200 if checks["status"] == "ok" else 503
+    return jsonify(checks), status_code
+
+
+@app.route("/keepalive")
+def keepalive():
+    try:
+        conn = get_db()
+        conn.execute("SELECT 1").fetchone()
+        conn.close()
+    except Exception:
+        pass
+    if not scheduler.running:
+        try:
+            scheduler.start()
+        except Exception:
+            pass
+    from database import cleanup_stale_states
+    try:
+        cleanup_stale_states()
+    except Exception:
+        pass
+    return jsonify({"ok": True, "time": datetime.now().isoformat()})
+
+
+@app.route("/webhook/register", methods=["POST"])
+def register_webhook():
+    import requests
+    resp = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook",
+        json={"url": f"{WEBHOOK_URL}", "max_connections": 1}
+    )
+    return jsonify(resp.json())
+
+
+@app.route("/webhook/info")
+def webhook_info():
+    import requests
+    resp = requests.get(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getWebhookInfo"
+    )
+    return jsonify(resp.json())
 
 
 if __name__ == "__main__":

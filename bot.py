@@ -1,6 +1,11 @@
 import re
 import os
+import time
+import logging
 from datetime import datetime
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+
 import telebot
 from telebot.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 import io
@@ -8,19 +13,35 @@ import openpyxl
 
 from config import TELEGRAM_TOKEN, ADMIN_USER_ID, WEBHOOK_URL, DATABASE_PATH
 from database import add_transaction, get_transactions, get_assets, get_categories, update_transaction
-from database import add_asset
+from database import add_asset, save_state, load_state, clear_state
 from asset_manager import get_asset_summary, liquidate_asset
 from finance_logic import get_balance, get_monthly_summary, get_category_breakdown
-from gsheets_sync import sync_expense_to_gsheet, sync_asset_to_gsheet
 from gsheets_reader import sync_all_from_sheets, read_expenses_from_sheet, read_portfolio_from_sheet
-from excel_sync import sync_expense_to_excel
+from gsheets_sync import sync_expense_to_gsheet, sync_asset_to_gsheet
 from simulation import run_monte_carlo, generate_projection_chart
 from nav_fetcher import fetch_nav_from_vnsignal, update_asset_nav, refresh_all_assets, add_ticker_column
 from llm_parser import parse_transaction
 
+logger = logging.getLogger(__name__)
+
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 
-user_state = {}
+# Rate limiter
+_callback_cooldown = defaultdict(float)
+
+# Timeout wrapper for external calls
+def with_timeout(timeout_secs=8):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                f = pool.submit(func, *args, **kwargs)
+                try:
+                    return f.result(timeout=timeout_secs)
+                except FutureTimeout:
+                    logger.error(f"TIMEOUT {timeout_secs}s: {func.__name__}")
+                    return None
+        return wrapper
+    return decorator
 
 def is_admin(user_id):
     return ADMIN_USER_ID == 0 or user_id == ADMIN_USER_ID
@@ -107,19 +128,10 @@ def cmd_setbalance(message: Message):
         bot.reply_to(message, "Số tiền không hợp lệ.")
         return
 
-    # Ghi 1 giao dịch đặc biệt loại "initial_balance"
     tid = add_transaction(
         message.from_user.id, amount, "initial_balance",
         f"Số dư ban đầu {bank}", is_asset=0, bank_account=bank
     )
-    # Sync lên Google Sheets
-    sync_expense_to_gsheet({
-        "date": datetime.now().isoformat()[:10],
-        "amount": amount,
-        "category": "initial_balance",
-        "description": f"Số dư ban đầu {bank}",
-        "bank_account": bank
-    })
     bot.reply_to(message, f"✅ Đã ghi số dư ban đầu {bank}: {amount:+,.0f} VND")
 
 @bot.message_handler(commands=["bankbalance"])
@@ -403,24 +415,7 @@ def cmd_buy(message: Message):
     # Add transaction for expense
     tid = add_transaction(message.from_user.id, -total_value, "investment", f"Buy {qty} {asset_name} @ {price}", is_asset=1)
     
-    # Capitalize it
-    aid = add_asset(message.from_user.id, tid, asset_name, total_value, 1) # Depreciate in 1 month (or could be 0, but logic expects >0)
-    
-    # Sync to Portfolio Google Sheet
-    gs_ok, gs_err = sync_asset_to_gsheet({
-        "date": datetime.now().isoformat()[:10],
-        "name": asset_name,
-        "value": total_value,
-        "note": f"Bought {qty} units at {price}"
-    }, is_buy=True)
-    if not gs_ok:
-        bot.send_message(
-            message.chat.id,
-            f"⚠️ *Cảnh báo:* Không sync tài sản vào Google Sheet!\n"
-            f"Lỗi: `{gs_err}`",
-            parse_mode="Markdown"
-        )
-    
+    aid = add_asset(message.from_user.id, tid, asset_name, total_value, 1)
     bot.reply_to(message, f"✅ Bought {qty} of {asset_name} for total {total_value:,.0f} VND.\nAsset tracked!")
 
 @bot.message_handler(commands=["sell"])
@@ -539,12 +534,19 @@ def cmd_navtest(message: Message):
     )
 
 @bot.message_handler(func=lambda m: True)
-def handle_message(message: Message):
+def handle_main_message(message: Message):
     if not is_admin(message.from_user.id):
         return
 
     uid = message.from_user.id
     text = message.text.strip()
+
+    # Check if user is in capitalize flow (SQLite-backed state)
+    loaded = load_state(uid)
+    cap = loaded.get("pending_capitalize")
+    if cap and cap != "None":
+        handle_capitalize_step(message, uid, cap)
+        return
 
     # Thử gọi LLM
     parsed = parse_transaction(text)
@@ -610,64 +612,25 @@ def handle_message(message: Message):
             bot.reply_to(message, f"Giao dịch: Chuyển tiền\nSố tiền: {abs(amount):,.0f}\nLỗi: AI không nhận diện được ngân hàng gửi và nhận. Hãy thử nói rõ hơn, vd: 'chuyển 50k từ VCB sang CASH'")
             return
             
-        # Execute Transfer
         tid_from = add_transaction(uid, -abs(amount), "transfer", desc, is_asset=0, bank_account=from_bank)
         tid_to = add_transaction(uid, abs(amount), "transfer", desc, is_asset=0, bank_account=to_bank)
-        
-        # Sync BOTH to Google Sheets
-        sync_expense_to_gsheet({
-            "date": datetime.now().isoformat()[:10],
-            "amount": -abs(amount),
-            "category": "transfer",
-            "description": f"Chuyển tiền sang {to_bank}: {desc}",
-            "bank_account": from_bank
-        })
-        sync_expense_to_gsheet({
-            "date": datetime.now().isoformat()[:10],
-            "amount": abs(amount),
-            "category": "transfer",
-            "description": f"Nhận tiền từ {from_bank}: {desc}",
-            "bank_account": to_bank
-        })
-        
         bot.reply_to(message, f"✅ Đã chuyển {abs(amount):,.0f} VND từ {from_bank} sang {to_bank}.")
         return
 
     # Normal Expense / Income
     if bank:
-        # Bank is determined, record immediately
         tid = add_transaction(uid, amount, cat, desc, is_asset=0, bank_account=bank)
-        
-        # Sync
-        gs_ok, gs_err = sync_expense_to_gsheet({
-            "date": datetime.now().isoformat()[:10],
-            "amount": amount,
-            "category": cat,
-            "description": desc,
-            "bank_account": bank
-        })
-        if not gs_ok:
-            bot.send_message(uid, f" *Cảnh báo:* Ghi vào Google Sheet thất bại!\nLỗi: `{gs_err}`", parse_mode="Markdown")
-            
-        sync_expense_to_excel({
-            "date": datetime.now().isoformat()[:10],
-            "amount": amount,
-            "category": cat,
-            "description": desc,
-            "bank_account": bank
-        })
-        
         bot.reply_to(message, f"✅ Đã lưu: {amount:+,.0f} - {desc} ({bank})\nSố dư: {get_balance():,.0f}")
         return
 
-    user_state[uid] = {
+    save_state(uid, {
         "pending_tx": {
             "amount": amount,
             "category": cat,
             "description": desc,
         }
-    }
-    
+    })
+
     markup = InlineKeyboardMarkup()
     markup.add(
         InlineKeyboardButton("VCB", callback_data="bank_VCB"),
@@ -685,11 +648,17 @@ def handle_message(message: Message):
 @bot.callback_query_handler(func=lambda c: True)
 def handle_callback(call):
     uid = call.from_user.id
+    now = time.time()
+    if now - _callback_cooldown.get(uid, 0) < 1.5:
+        bot.answer_callback_query(call.id, "⏳ Please wait...")
+        return
+    _callback_cooldown[uid] = now
     data = call.data
 
     if data.startswith("bank_"):
         bank = data.split("_")[1]
-        state = user_state.get(uid, {}).get("pending_tx")
+        loaded = load_state(uid)
+        state = loaded.get("pending_tx")
         if not state:
             bot.answer_callback_query(call.id, "Session expired.")
             return
@@ -699,32 +668,6 @@ def handle_callback(call):
         cat = state["category"]
         
         tid = add_transaction(uid, amount, cat, desc, is_asset=0, bank_account=bank)
-        
-        # Sync to Expense Google Sheet
-        gs_ok, gs_err = sync_expense_to_gsheet({
-            "date": datetime.now().isoformat()[:10],
-            "amount": amount,
-            "category": cat,
-            "description": desc,
-            "bank_account": bank
-        })
-        if not gs_ok:
-            bot.send_message(
-                uid,
-                f"⚠️ *Cảnh báo:* Ghi vào Google Sheet thất bại!\n"
-                f"Dữ liệu đã lưu vào database local.\n"
-                f"Lỗi: `{gs_err}`",
-                parse_mode="Markdown"
-            )
-
-        # Sync to local Excel file
-        sync_expense_to_excel({
-            "date": datetime.now().isoformat()[:10],
-            "amount": amount,
-            "category": cat,
-            "description": desc,
-            "bank_account": bank
-        })
         
         bot.delete_message(call.message.chat.id, call.message.message_id)
         
@@ -747,16 +690,16 @@ def handle_callback(call):
                 f"Recorded: {amount:+,.0f} - {desc} ({bank})\nBalance: {bal:,.0f}",
             )
             
-        user_state[uid] = {"pending_capitalize": None}
+        clear_state(uid)
         bot.answer_callback_query(call.id)
 
     elif data.startswith("cap_"):
         parts = data.split("_")
         tid = int(parts[1])
         asset_value = float(parts[2])
-        user_state[uid] = {
+        save_state(uid, {
             "pending_capitalize": {"tid": tid, "value": asset_value, "step": "ask_name"}
-        }
+        })
         bot.send_message(uid, "Asset name (e.g. MacBook Pro 14):")
         bot.answer_callback_query(call.id)
 
@@ -765,21 +708,17 @@ def handle_callback(call):
         bot.answer_callback_query(call.id)
 
     elif data == "cancel_capitalize":
-        user_state[uid] = {}
+        clear_state(uid)
         bot.send_message(uid, "Cancelled.")
         bot.answer_callback_query(call.id)
 
-@bot.message_handler(func=lambda m: m.from_user.id in user_state and user_state[m.from_user.id].get("pending_capitalize"))
-def handle_capitalize_flow(message: Message):
-    uid = message.from_user.id
-    state = user_state[uid]["pending_capitalize"]
-    step = state.get("step")
-
+def handle_capitalize_step(message, uid, cap):
+    step = cap.get("step")
     if step == "ask_name":
-        state["name"] = message.text.strip()
-        state["step"] = "ask_months"
-        bot.reply_to(message, f"Asset name: {state['name']}\nDepreciation period (months, e.g. 12):")
-
+        cap["name"] = message.text.strip()
+        cap["step"] = "ask_months"
+        save_state(uid, {"pending_capitalize": cap})
+        bot.reply_to(message, f"Asset name: {cap['name']}\nDepreciation period (months, e.g. 12):")
     elif step == "ask_months":
         try:
             months = int(message.text.strip())
@@ -788,18 +727,15 @@ def handle_capitalize_flow(message: Message):
         except ValueError:
             bot.reply_to(message, "Please enter a valid number of months (>= 1).")
             return
-
-        tid = state["tid"]
-        name = state["name"]
-        value = state["value"]
+        tid = cap["tid"]
+        name = cap["name"]
+        value = cap["value"]
         aid = add_asset(uid, tid, name, value, months)
-
         from database import get_db
         conn = get_db()
         conn.execute("UPDATE transactions SET is_asset = 1 WHERE id = ?", (tid,))
         conn.commit()
         conn.close()
-
         bot.reply_to(
             message,
             f"Asset capitalized!\n"
@@ -809,30 +745,7 @@ def handle_capitalize_flow(message: Message):
             f"Monthly: {value / months:,.0f}\n\n"
             f"Use /asset to track it.",
         )
-        
-        # Sync to Capitalized Assets tab in My Expenses
-        from gsheets_sync import sync_capitalized_asset
-        gs_ok, gs_err = sync_capitalized_asset({
-            "date": datetime.now().isoformat()[:10],
-            "name": name,
-            "original_value": value,
-            "remaining_value": value,
-            "months": months,
-            "monthly_depr": round(value / months, 2),
-            "depreciated_sofar": 0,
-            "status": "Active",
-            "note": "Capitalized from expense",
-        })
-        if not gs_ok:
-            bot.send_message(
-                uid,
-                f"⚠️ *Cảnh báo:* Không sync vào Capitalized Assets!\n"
-                f"Dữ liệu đã lưu vào database local.\n"
-                f"Lỗi: `{gs_err}`",
-                parse_mode="Markdown"
-            )
-
-        user_state[uid] = {}
+        clear_state(uid)
 
 def guess_category(desc):
     desc_lower = desc.lower()

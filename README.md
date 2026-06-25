@@ -430,6 +430,10 @@ All JSON endpoints accept/return `Content-Type: application/json`.
 | POST | `/webhook/<token>` | Telegram Update JSON | `200 OK` |
 | GET | `/export/excel` | none | Excel file download |
 | GET | `/mobile-snapshot` | none | HTML page (Mini App) |
+| GET | `/health` | none | JSON health check (DB, scheduler, error count) |
+| GET | `/keepalive` | none | Keep app alive, touch DB, cleanup stale state |
+| POST | `/webhook/register` | none | Re-register Telegram webhook |
+| GET | `/webhook/info` | none | Show webhook status from Telegram API |
 
 ---
 
@@ -554,7 +558,21 @@ python app.py
    print(requests.get(url).json())
    "
    ```
-6. **Keep alive**: Set up a cron-job.org task or PythonAnywhere scheduled task to ping `/ping` every 5 minutes (free tier sleeps after inactivity).
+6. **Keep alive (QUAN TRỌNG)**: Free tier web app sleep sau ~10 phút không traffic.
+   - Tạo task trên [cron-job.org](https://cron-job.org):
+     - URL: `https://yourusername.pythonanywhere.com/keepalive`
+     - Interval: **Every 3 minutes**
+   - Endpoint `/keepalive` tự động: touch database, check scheduler, cleanup stale state.
+   - Kiểm tra sức khỏe: `https://yourusername.pythonanywhere.com/health`
+
+7. **Webhook recovery**: Nếu bot không phản hồi, re-register webhook:
+   ```bash
+   curl -X POST https://yourusername.pythonanywhere.com/webhook/register
+   ```
+   Kiểm tra trạng thái webhook:
+   ```bash
+   curl https://yourusername.pythonanywhere.com/webhook/info
+   ```
 
 ### Bot Mode: Polling vs Webhook
 
