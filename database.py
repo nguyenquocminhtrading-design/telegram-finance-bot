@@ -294,13 +294,16 @@ def save_state(user_id, data_dict):
 
 def load_state(user_id):
     conn = get_db()
+    prefix = f"state_{user_id}_"
     rows = conn.execute(
-        "SELECT key, value FROM settings WHERE key LIKE ?", (f"state_{user_id}_%",)
+        "SELECT key, value FROM settings WHERE key LIKE ?", (prefix + "%",)
     ).fetchall()
     conn.close()
     state = {}
     for r in rows:
-        k = r["key"].rsplit("_", 1)[-1]
+        # Strip the full "state_{user_id}_" prefix to get the real field name
+        # e.g. "state_123_pending_bank" -> "pending_bank"
+        k = r["key"][len(prefix):]
         try:
             state[k] = json.loads(r["value"])
         except (json.JSONDecodeError, ValueError):
