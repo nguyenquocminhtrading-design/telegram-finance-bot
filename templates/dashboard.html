@@ -48,8 +48,8 @@
                         <div class="value text-red">-{{ "{:,.0f}".format(report.monthly.expense) }}</div>
                     </div>
                     <div class="card stat-card">
-                        <h4>Total Savings</h4>
-                        <div class="value text-green">{{ assets.active_count }} Active</div>
+                        <h4>Portfolio Value</h4>
+                        <div class="value text-green">{{ "{:,.0f}".format(assets.total_current) }}</div>
                     </div>
                 </div>
 

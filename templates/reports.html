@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Reports</title>
     <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
     <nav class="sidebar">
@@ -59,6 +60,17 @@
                 <div id="topCategoriesChart-legend"></div>
             </div>
             <div class="chart-card">
+                <h3>Spend by Account</h3>
+                <canvas id="bankSpendChart" width="300" height="300"></canvas>
+            </div>
+        </div>
+
+        <div class="charts-row">
+            <div class="chart-card">
+                <h3>Bank Spend Trend</h3>
+                <canvas id="bankTrendChart" width="500" height="250"></canvas>
+            </div>
+            <div class="chart-card">
                 <h3>Portfolio Mix</h3>
                 <canvas id="portfolioChart" width="300" height="300"></canvas>
             </div>
@@ -99,6 +111,16 @@
 
         const cats = report.categories || [];
         drawPieChart("topCategoriesChart", cats.map(c => c.total), cats.map(c => c.category));
+        const bankSpend = report.bank_spend || {};
+        drawPieChart("bankSpendChart", Object.values(bankSpend), Object.keys(bankSpend));
+        const trend = report.bank_trend || [];
+        const trendLabels = trend.map(r => r.label);
+        const bankSeries = ["VCB", "ACB", "HDBANK", "CASH", "MOMO", "unassigned"].map((bank, idx) => ({
+            label: bank,
+            data: trend.map(r => (r.values && r.values[bank]) || 0),
+            color: ["#1d4ed8", "#2563eb", "#06b6d4", "#10b981", "#f59e0b", "#64748b"][idx],
+        }));
+        drawStackedBarChart("bankTrendChart", trendLabels, bankSeries);
         drawPortfolioChart("portfolioChart", assets.assets || []);
     </script>
 </body>

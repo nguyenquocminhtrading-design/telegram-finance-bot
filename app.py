@@ -32,6 +32,23 @@ logger = logging.getLogger(__name__)
 
 WEB_USER_ID = ADMIN_USER_ID or 0
 
+
+def resolve_web_user_id():
+    if WEB_USER_ID:
+        return WEB_USER_ID
+    conn = get_db()
+    row = conn.execute(
+        "SELECT user_id, COUNT(*) as cnt FROM transactions GROUP BY user_id ORDER BY cnt DESC LIMIT 1"
+    ).fetchone()
+    if row:
+        conn.close()
+        return row["user_id"]
+    row = conn.execute(
+        "SELECT user_id, COUNT(*) as cnt FROM assets GROUP BY user_id ORDER BY cnt DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return row["user_id"] if row else 0
+
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
@@ -52,30 +69,33 @@ def index():
 
 @app.route("/dashboard")
 def dashboard():
-    report = get_full_report(WEB_USER_ID)
-    assets = get_asset_summary(WEB_USER_ID)
-    recent_transactions = get_transactions(WEB_USER_ID, limit=5, offset=0)
+    uid = resolve_web_user_id()
+    report = get_full_report(uid)
+    assets = get_asset_summary(uid)
+    recent_transactions = get_transactions(uid, limit=5, offset=0)
     return render_template("dashboard.html", report=report, assets=assets, recent_transactions=recent_transactions)
 
 
 @app.route("/snapshot")
 def snapshot():
-    report = get_full_report(WEB_USER_ID)
-    assets = get_asset_summary(WEB_USER_ID)
+    uid = resolve_web_user_id()
+    report = get_full_report(uid)
+    assets = get_asset_summary(uid)
     return render_template("mobile_snapshot.html", report=report, assets=assets)
 
 
 @app.route("/transactions")
 def transactions_page():
+    uid = resolve_web_user_id()
     page = request.args.get("page", 1, type=int)
     per_page = 20
     category = request.args.get("category")
     start_date = request.args.get("start_date")
     end_date = request.args.get("end_date")
     offset = (page - 1) * per_page
-    txs = get_transactions(WEB_USER_ID, per_page, offset, category, start_date, end_date)
-    total = count_transactions(WEB_USER_ID, category, start_date, end_date)
-    cats = get_categories(WEB_USER_ID)
+    txs = get_transactions(uid, per_page, offset, category, start_date, end_date)
+    total = count_transactions(uid, category, start_date, end_date)
+    cats = get_categories(uid)
     return render_template(
         "transactions.html",
         transactions=txs,
@@ -91,14 +111,15 @@ def transactions_page():
 
 @app.route("/assets")
 def assets_page():
-    summary = get_asset_summary(WEB_USER_ID)
+    summary = get_asset_summary(resolve_web_user_id())
     return render_template("assets.html", summary=summary)
 
 
 @app.route("/reports")
 def reports_page():
-    report = get_full_report(WEB_USER_ID)
-    assets = get_asset_summary(WEB_USER_ID)
+    uid = resolve_web_user_id()
+    report = get_full_report(uid)
+    assets = get_asset_summary(uid)
     return render_template("reports.html", report=report, assets=assets)
 
 
@@ -114,14 +135,15 @@ def ping():
 
 @app.route("/api/transactions", methods=["GET"])
 def api_transactions():
+    uid = resolve_web_user_id()
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 50, type=int)
     category = request.args.get("category")
     start_date = request.args.get("start_date")
     end_date = request.args.get("end_date")
     offset = (page - 1) * per_page
-    txs = get_transactions(WEB_USER_ID, per_page, offset, category, start_date, end_date)
-    total = count_transactions(WEB_USER_ID, category, start_date, end_date)
+    txs = get_transactions(uid, per_page, offset, category, start_date, end_date)
+    total = count_transactions(uid, category, start_date, end_date)
     return jsonify({"data": txs, "total": total, "page": page, "per_page": per_page})
 
 
@@ -132,7 +154,7 @@ def api_add_transaction():
         return jsonify({"error": "Invalid JSON"}), 400
     from database import add_transaction
     tid = add_transaction(
-        user_id=WEB_USER_ID,
+        user_id=resolve_web_user_id(),
         amount=data.get("amount", 0),
         category=data.get("category", "other"),
         description=data.get("description", ""),
@@ -169,31 +191,31 @@ def api_delete_transaction(tid):
 
 @app.route("/api/summary")
 def api_summary():
-    report = get_full_report(WEB_USER_ID)
+    report = get_full_report(resolve_web_user_id())
     return jsonify(report)
 
 
 @app.route("/api/assets")
 def api_assets():
-    summary = get_asset_summary(WEB_USER_ID)
+    summary = get_asset_summary(resolve_web_user_id())
     return jsonify(summary)
 
 
 @app.route("/api/categories")
 def api_categories():
-    cats = get_categories(WEB_USER_ID)
+    cats = get_categories(resolve_web_user_id())
     return jsonify(cats)
 
 
 @app.route("/api/run-depreciation", methods=["POST"])
 def api_run_depreciation():
-    results = run_monthly_depreciation(WEB_USER_ID)
+    results = run_monthly_depreciation(resolve_web_user_id())
     return jsonify({"depreciated": len(results), "details": results})
 
 
 @app.route("/api/export/excel", methods=["GET"])
 def api_export_excel():
-    txs = get_transactions(WEB_USER_ID, 10000, 0)
+    txs = get_transactions(resolve_web_user_id(), 10000, 0)
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Transactions"

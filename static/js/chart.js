@@ -2,7 +2,12 @@ function formatVnd(value) {
     return new Intl.NumberFormat("en-US").format(value) + " VND";
 }
 
+function chartAvailable() {
+    return typeof Chart !== "undefined";
+}
+
 function destroyIfExists(canvasId) {
+    if (!chartAvailable()) return null;
     const canvas = document.getElementById(canvasId);
     if (!canvas) return null;
     const existing = Chart.getChart(canvas);
@@ -19,6 +24,7 @@ function baseOptions() {
 }
 
 function drawLineChart(canvasId, labels, data, color, label = "") {
+    if (!chartAvailable()) return;
     const canvas = destroyIfExists(canvasId);
     if (!canvas) return;
 
@@ -66,6 +72,7 @@ function drawLineChart(canvasId, labels, data, color, label = "") {
 }
 
 function drawComparisonLineChart(canvasId, labels, seriesList) {
+    if (!chartAvailable()) return;
     const canvas = destroyIfExists(canvasId);
     if (!canvas) return;
 
@@ -117,6 +124,7 @@ function drawComparisonLineChart(canvasId, labels, seriesList) {
 }
 
 function drawBarChart(canvasId, labels, incomeData, expenseData) {
+    if (!chartAvailable()) return;
     const canvas = destroyIfExists(canvasId);
     if (!canvas) return;
 
@@ -181,6 +189,7 @@ function drawBarChart(canvasId, labels, incomeData, expenseData) {
 }
 
 function drawPieChart(canvasId, data, labels) {
+    if (!chartAvailable()) return;
     const canvas = destroyIfExists(canvasId);
     if (!canvas) return;
 
@@ -222,10 +231,63 @@ function drawPieChart(canvasId, data, labels) {
 }
 
 function drawPortfolioChart(canvasId, assets) {
+    if (!chartAvailable()) return;
     const active = (assets || []).filter(a => a.is_active);
     const labels = active.map(a => a.name);
     const data = active.map(a => a.current_value);
     drawPieChart(canvasId, data, labels);
+}
+
+function drawStackedBarChart(canvasId, labels, seriesList) {
+    if (!chartAvailable()) return;
+    const canvas = destroyIfExists(canvasId);
+    if (!canvas) return;
+
+    new Chart(canvas, {
+        type: "bar",
+        data: {
+            labels,
+            datasets: seriesList.map((series) => ({
+                label: series.label,
+                data: series.data,
+                backgroundColor: series.color,
+                borderRadius: 4,
+                barPercentage: 0.75,
+                categoryPercentage: 0.8,
+            })),
+        },
+        options: {
+            ...baseOptions(),
+            plugins: {
+                legend: {
+                    position: "top",
+                    labels: { usePointStyle: true, boxWidth: 8 },
+                },
+                tooltip: {
+                    callbacks: {
+                        label: (context) => `${context.dataset.label}: ${formatVnd(context.parsed.y)}`,
+                    },
+                },
+            },
+            scales: {
+                x: {
+                    stacked: true,
+                    grid: { display: false },
+                },
+                y: {
+                    stacked: true,
+                    grid: { borderDash: [5, 5], color: "#f1f5f9" },
+                    ticks: {
+                        callback: (value) => {
+                            if (value >= 1000000) return `${value / 1000000}M`;
+                            if (value >= 1000) return `${value / 1000}K`;
+                            return value;
+                        },
+                    },
+                },
+            },
+        },
+    });
 }
 
 function initDashboardCharts(report, assets) {
@@ -241,4 +303,9 @@ function initDashboardCharts(report, assets) {
     const cats = report.categories || [];
     drawPieChart("categoryChart", cats.map(c => c.total), cats.map(c => c.category));
     drawPortfolioChart("portfolioChart", assets ? assets.assets : []);
+
+    const bankSpend = report.bank_spend || {};
+    const bankLabels = Object.keys(bankSpend);
+    const bankData = bankLabels.map(k => bankSpend[k] || 0);
+    drawPieChart("bankSpendChart", bankData, bankLabels);
 }

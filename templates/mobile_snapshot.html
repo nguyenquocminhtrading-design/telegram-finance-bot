@@ -116,9 +116,9 @@
         </div>
 
         <div class="card">
-            <h3>Active Assets</h3>
-            <div class="value" style="color:var(--blue);">{{ assets.active_count }}</div>
-            <p style="font-size:12px; color:var(--muted); margin-top:5px;">Total Value: {{ "{:,.0f}".format(assets.total_current) }} VND</p>
+            <h3>Portfolio Value</h3>
+            <div class="value" style="color:var(--blue);">{{ "{:,.0f}".format(assets.total_current) }}</div>
+            <p style="font-size:12px; color:var(--muted); margin-top:5px;">Active assets: {{ assets.active_count }}</p>
         </div>
     </div>
 
