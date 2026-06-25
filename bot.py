@@ -1,35 +1,29 @@
-import re
 import os
-import time
 import logging
 from datetime import datetime
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 import telebot
-from telebot.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from telebot.types import Message
 import io
 import openpyxl
 
 from config import TELEGRAM_TOKEN, ADMIN_USER_ID, WEBHOOK_URL, DATABASE_PATH
-from database import add_transaction, get_transactions, get_assets, get_categories, update_transaction
-from database import add_asset, save_state, load_state, clear_state
+from database import add_transaction, get_transactions, add_asset, save_state, load_state, clear_state, get_db
 from asset_manager import get_asset_summary, liquidate_asset
 from finance_logic import get_balance, get_monthly_summary, get_category_breakdown
 from gsheets_reader import sync_all_from_sheets, read_expenses_from_sheet, read_portfolio_from_sheet
-from gsheets_sync import sync_expense_to_gsheet, sync_asset_to_gsheet
 from simulation import run_monte_carlo, generate_projection_chart
-from nav_fetcher import fetch_nav_from_vnsignal, update_asset_nav, refresh_all_assets, add_ticker_column
+from nav_fetcher import fetch_nav_from_vnsignal, update_asset_nav, refresh_all_assets
 from llm_parser import parse_transaction
+from local_parser import parse_transaction_local
 
 logger = logging.getLogger(__name__)
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 
-# Rate limiter
-_callback_cooldown = defaultdict(float)
+VALID_BANKS = ["VCB", "ACB", "HDBANK", "CASH", "MOMO"]
 
-# Timeout wrapper for external calls
 def with_timeout(timeout_secs=8):
     def decorator(func):
         def wrapper(*args, **kwargs):
@@ -55,6 +49,12 @@ def parse_amount(text):
         return num * multipliers[suffix]
     return float(text)
 
+def ask_bank(uid, amount, cat, desc):
+    save_state(uid, {"pending_bank": {"amount": amount, "category": cat, "desc": desc}})
+    bot.send_message(uid,
+        f"Amount: {amount:+,.0f}\nDesc: {desc}\n"
+        f"Which bank? (VCB / ACB / HDBANK / CASH / MOMO)")
+
 @bot.message_handler(commands=["start"])
 def cmd_start(message: Message):
     if not is_admin(message.from_user.id):
@@ -66,52 +66,32 @@ def cmd_start(message: Message):
 def cmd_help(message: Message):
     if not is_admin(message.from_user.id):
         return
-    
     help_text = (
         "📊 *FINANCE BOT COMMAND PANEL* 📊\n"
         "─────────────────────────────\n"
-        "🤖 *AI tự động nhận diện tiếng Việt:*\n"
+        "🤖 *Tự động nhận diện:*\n"
         "  `ăn cơm 50k vcb`\n"
         "  `nhận lương 15tr acb`\n"
         "  `chuyển 2tr từ VCB sang CASH`\n\n"
-        "📝 *Cú pháp truyền thống:*\n"
-        "  `+500 salary` / `-200 lunch`\n"
-        "  `-500k bàn phím` (≥200k → hỏi vốn hóa)\n\n"
-        "💳 *Tài khoản hỗ trợ:* VCB · ACB · HDBANK · CASH\n\n"
-        "💸 *Chuyển tiền giữa tài khoản:*\n"
-        "  `chuyển 5tr từ VCB sang ACB`\n"
-        "  `/transfer <amount> <from> <to>`\n\n"
-        "💰 *Số dư ban đầu:*\n"
-        "  `/setbalance <bank> <amount>` - Ghi số dư mở đầu\n"
-        "  Ví dụ: `/setbalance VCB 5000000`\n\n"
-        "💼 *Quản lý Tài sản:*\n"
-        "  `/buy <asset> <qty> <price>` - Mua tài sản\n"
+        "📝 *Cú pháp:* `+500 salary` / `-200 lunch`\n\n"
+        "💳 *Tài khoản:* VCB · ACB · HDBANK · CASH · MOMO\n\n"
+        "💸 *Chuyển tiền:* `chuyển 5tr từ VCB sang ACB`\n\n"
+        "💰 `/setbalance <bank> <amount>` - Số dư ban đầu\n\n"
+        "💼 `/buy <asset> <qty> <price>` - Mua tài sản\n"
         "  `/liquidate <id> <price>` - Bán tài sản\n"
-        "  `/asset` - Xem danh mục tài sản\n"
-        "  `/nav <id> [ticker]` - Cập nhật NAV cho 1 tài sản\n"
-        "  `/refresh` - Cập nhật NAV tất cả tài sản\n"
-        "  *Vốn hóa tự động:* Chi tiêu ≥200k → bot hỏi \"có vốn hóa?\"\n"
-        "    → Nhập tên TS → nhập tháng KH → tự động theo dõi + khấu hao\n\n"
-        "🔄 *Đồng bộ dữ liệu:*\n"
-        "  `/sync` - Import dữ liệu từ Google Sheets vào SQLite\n\n"
-        "📈 *Báo cáo & Thống kê:*\n"
-        "  `/balance` - Tổng số dư hiện tại\n"
+        "  `/asset` - Danh mục tài sản\n"
+        "  `/nav <id> [ticker]` - Cập nhật NAV\n"
+        "  `/refresh` - Refresh NAV tất cả\n\n"
+        "📈 `/balance` - Số dư\n"
         "  `/bankbalance` - Số dư từng tài khoản\n"
-        "  `/report` - Báo cáo tháng này\n"
-        "  `/project <amount> <months>` - Monte Carlo\n"
-        "  `/export` - Xuất file Excel\n"
-        "  `/web` - Mở Dashboard\n\n"
-        "🔧 *Debug & Kiểm tra:*\n"
-        "  `/ping` - Kiểm tra bot còn sống\n"
-        "  `/dbcheck` - Thống kê database\n"
-        "  `/gscheck` - Kiểm tra Google Sheets\n"
-        "  `/envcheck` - Kiểm tra biến môi trường\n"
-        "  `/logs <n>` - Xem n dòng log gần nhất\n"
-        "  `/navtest <ticker>` - Test fetch NAV\n"
-        "─────────────────────────────"
+        "  `/report` - Báo cáo tháng\n"
+        "  `/project` - Monte Carlo\n"
+        "  `/export` - Excel\n"
+        "  `/web` - Dashboard\n\n"
+        "🔄 `/sync` - Đồng bộ Google Sheets\n\n"
+        "🔧 `/ping` `/dbcheck` `/gscheck` `/envcheck` `/logs` `/navtest`"
     )
     bot.reply_to(message, help_text, parse_mode="Markdown")
-
 
 @bot.message_handler(commands=["setbalance"])
 def cmd_setbalance(message: Message):
@@ -119,47 +99,38 @@ def cmd_setbalance(message: Message):
         return
     parts = message.text.split()
     if len(parts) < 3:
-        bot.reply_to(message, "Cách dùng: /setbalance <bank> <amount>\nVí dụ: /setbalance VCB 5000000")
+        bot.reply_to(message, "/setbalance <bank> <amount>\nVD: /setbalance VCB 5000000")
         return
     bank = parts[1].upper()
     try:
         amount = float(parts[2].replace(",", "").replace(".", ""))
     except ValueError:
-        bot.reply_to(message, "Số tiền không hợp lệ.")
+        bot.reply_to(message, "Invalid amount.")
         return
-
-    tid = add_transaction(
-        message.from_user.id, amount, "initial_balance",
-        f"Số dư ban đầu {bank}", is_asset=0, bank_account=bank
-    )
-    bot.reply_to(message, f"✅ Đã ghi số dư ban đầu {bank}: {amount:+,.0f} VND")
+    add_transaction(message.from_user.id, amount, "initial_balance",
+                    f"Số dư ban đầu {bank}", is_asset=0, bank_account=bank)
+    bot.reply_to(message, f"✅ Initial balance {bank}: {amount:+,.0f} VND")
 
 @bot.message_handler(commands=["bankbalance"])
 def cmd_bankbalance(message: Message):
     if not is_admin(message.from_user.id):
         return
-    from database import get_db
     conn = get_db()
     rows = conn.execute(
-        """SELECT bank_account, SUM(amount) as balance
-           FROM transactions
-           WHERE bank_account IS NOT NULL AND bank_account != ''
-           GROUP BY bank_account
-           ORDER BY balance DESC"""
+        "SELECT bank_account, SUM(amount) as balance FROM transactions"
+        " WHERE bank_account IS NOT NULL AND bank_account != ''"
+        " GROUP BY bank_account ORDER BY balance DESC"
     ).fetchall()
     conn.close()
-
     if not rows:
-        bot.reply_to(message, "Chưa có giao dịch nào có thông tin ngân hàng.")
+        bot.reply_to(message, "No bank transactions yet.")
         return
-
     total = sum(r["balance"] for r in rows)
-    lines = ["💳 *Số dư theo tài khoản:*", ""]
+    lines = ["💳 *Balance by account:*", ""]
     for r in rows:
-        sign = "+" if r["balance"] >= 0 else ""
-        lines.append(f"  {r['bank_account']}: `{sign}{r['balance']:,.0f}` VND")
+        lines.append(f"  {r['bank_account']}: `{r['balance']:+,.0f}` VND")
     lines.append("")
-    lines.append(f"  *TỔNG: `{total:+,.0f}` VND*")
+    lines.append(f"  *TOTAL: `{total:+,.0f}` VND*")
     bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
 
 @bot.message_handler(commands=["balance"])
@@ -167,8 +138,7 @@ def cmd_balance(message: Message):
     if not is_admin(message.from_user.id):
         return
     bal = get_balance()
-    resp = f"Current Balance: **{bal:,.0f} VND**" if abs(bal) >= 1000 else f"Current Balance: **{bal}**"
-    bot.reply_to(message, resp, parse_mode="Markdown")
+    bot.reply_to(message, f"Balance: **{bal:,.0f} VND**", parse_mode="Markdown")
 
 @bot.message_handler(commands=["report"])
 def cmd_report(message: Message):
@@ -179,8 +149,7 @@ def cmd_report(message: Message):
     lines = [f"Report - {datetime.now().strftime('%Y-%m')}",
              f"Income: +{summary['income']:,.0f}",
              f"Expense: -{summary['expense']:,.0f}",
-             f"Net: {summary['net']:,.0f}",
-             ""]
+             f"Net: {summary['net']:,.0f}", ""]
     if cats:
         lines.append("Top spending:")
         for c in cats[:5]:
@@ -196,9 +165,8 @@ def cmd_asset(message: Message):
         bot.reply_to(message, "No capitalized assets.")
         return
     lines = [f"Assets ({summary['active_count']} active / {summary['total_assets']} total)",
-             f"Total original: {summary['total_original']:,.0f}",
-             f"Current value: {summary['total_current']:,.0f}",
-             ""]
+             f"Original: {summary['total_original']:,.0f}",
+             f"Current: {summary['total_current']:,.0f}", ""]
     for a in summary["assets"]:
         marker = " [active]" if a["is_active"] else " [done]"
         lines.append(f"- {a['name']}: {a['current_value']:,.0f}/{a['original_value']:,.0f}{marker}")
@@ -206,13 +174,10 @@ def cmd_asset(message: Message):
 
 @bot.message_handler(commands=["web"])
 def cmd_web(message: Message):
+    if not is_admin(message.from_user.id):
+        return
     base = WEBHOOK_URL.rsplit("/webhook", 1)[0] if "/webhook" in WEBHOOK_URL else WEBHOOK_URL
-    if base.startswith("https://"):
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("Open Mini App", web_app=WebAppInfo(url=f"{base}/snapshot")))
-        bot.reply_to(message, f"Dashboard: {base}/dashboard\nOr open Mini App below:", reply_markup=markup)
-    else:
-        bot.reply_to(message, f"Dashboard: {base}/dashboard\n(Mini App requires HTTPS webhook URL)")
+    bot.reply_to(message, f"Dashboard: {base}/dashboard")
 
 @bot.message_handler(commands=["nav"])
 def cmd_nav(message: Message):
@@ -220,24 +185,22 @@ def cmd_nav(message: Message):
         return
     parts = message.text.split()
     if len(parts) < 2:
-        bot.reply_to(message, "Cách dùng: `/nav <asset_id>` hoặc `/nav <asset_id> <ticker>`\nVD: `/nav 1 DCDS`", parse_mode="Markdown")
+        bot.reply_to(message, "/nav <asset_id> [ticker]\nVD: /nav 1 DCDS", parse_mode="Markdown")
         return
     try:
         aid = int(parts[1])
     except ValueError:
-        bot.reply_to(message, "Asset ID không hợp lệ")
+        bot.reply_to(message, "Invalid asset ID")
         return
     ticker = parts[2].upper() if len(parts) >= 3 else None
-    msg = bot.reply_to(message, f"Đang lấy NAV cho asset #{aid}...")
+    msg = bot.reply_to(message, f"Fetching NAV for asset #{aid}...")
     ok, result = update_asset_nav(aid, ticker)
     if not ok:
         bot.edit_message_text(f"❌ {result}", msg.chat.id, msg.message_id)
         return
     bot.edit_message_text(
-        f"✅ *{result['name']}* — NAV cập nhật\n"
-        f"NAV/CCQ: `{result['nav']:,.0f} VND`\n"
-        f"Giá trị tài sản: `{result['new_value']:,.0f} VND`\n"
-        f"Ngày: {result['date']}",
+        f"✅ *{result['name']}* — NAV: `{result['nav']:,.0f}`\n"
+        f"Value: `{result['new_value']:,.0f}`\nDate: {result['date']}",
         msg.chat.id, msg.message_id, parse_mode="Markdown"
     )
 
@@ -245,83 +208,58 @@ def cmd_nav(message: Message):
 def cmd_refresh(message: Message):
     if not is_admin(message.from_user.id):
         return
-    msg = bot.reply_to(message, "Đang cập nhật NAV cho tất cả tài sản có ticker...")
+    msg = bot.reply_to(message, "Refreshing all NAVs...")
     results = refresh_all_assets()
-    lines = ["✅ *Refresh NAV hoàn tất*", ""]
+    lines = ["✅ *Refresh complete*", ""]
     ok_count = sum(1 for r in results if r["ok"])
-    lines.append(f"Thành công: {ok_count}/{len(results)}")
+    lines.append(f"Success: {ok_count}/{len(results)}")
     for r in results:
         icon = "✅" if r["ok"] else "❌"
-        name = r["name"]
         if r["ok"]:
             d = r["data"]
-            lines.append(f"{icon} {name}: `{d['nav']:,.0f}` (ngày {d['date']})")
+            lines.append(f"{icon} {r['name']}: `{d['nav']:,.0f}` ({d['date']})")
         else:
-            lines.append(f"{icon} {name}: {r['data']}")
+            lines.append(f"{icon} {r['name']}: {r['data']}")
     bot.edit_message_text("\n".join(lines), msg.chat.id, msg.message_id, parse_mode="Markdown")
 
 @bot.message_handler(commands=["sync"])
 def cmd_sync(message: Message):
     if not is_admin(message.from_user.id):
         return
-    msg = bot.reply_to(message, "Đang đồng bộ dữ liệu từ Google Sheets vào SQLite...")
+    msg = bot.reply_to(message, "Syncing from Google Sheets...")
     results = sync_all_from_sheets()
-    lines = ["✅ *Đồng bộ hoàn tất*", ""]
     e = results["expenses"]
-    lines.append(f"📄 *Expenses:* {e['imported']} imported, {e['skipped']} skipped")
-    if e["error"]:
-        lines.append(f"  ⚠️ Lỗi: {e['error']}")
     p = results["portfolio"]
-    lines.append(f"💼 *Portfolio:* {p['imported']} imported, {p['skipped']} skipped")
-    if p["error"]:
-        lines.append(f"  ⚠️ Lỗi: {p['error']}")
-    bot.edit_message_text("\n".join(lines), msg.chat.id, msg.message_id, parse_mode="Markdown")
+    bot.edit_message_text(
+        f"✅ *Sync complete*\n"
+        f"Expenses: {e['imported']} imported, {e['skipped']} skipped\n"
+        f"Portfolio: {p['imported']} imported, {p['skipped']} skipped",
+        msg.chat.id, msg.message_id, parse_mode="Markdown"
+    )
 
 @bot.message_handler(commands=["project", "montecarlo"])
 def cmd_project(message: Message):
     if not is_admin(message.from_user.id):
         return
-    
     parts = message.text.split()
-    monthly_contribution = 5000000 # default 5tr
-    months = 60 # default 60 months
-    
+    monthly = 5000000
+    months = 60
     if len(parts) >= 2:
-        try:
-            monthly_contribution = parse_amount(parts[1])
-        except ValueError:
-            pass
-            
+        try: monthly = parse_amount(parts[1])
+        except ValueError: pass
     if len(parts) >= 3:
-        try:
-            months = int(parts[2])
-        except ValueError:
-            pass
-            
-    bot.reply_to(message, f"🏃 Running Monte Carlo simulation...\n"
-                          f"Monthly Contribution: {monthly_contribution:,.0f} VND\n"
-                          f"Period: {months} months")
-                          
-    # Get current active assets value
+        try: months = int(parts[2])
+        except ValueError: pass
+    bot.reply_to(message, f"Running Monte Carlo...\nMonthly: {monthly:,.0f}\nPeriod: {months}m")
     summary = get_asset_summary()
-    current_portfolio_value = summary['total_current']
-    
-    # Run simulation
-    paths = run_monte_carlo(current_portfolio_value, monthly_contribution, months=months)
-    chart_buf, stats = generate_projection_chart(paths, monthly_contribution)
-    
-    # Build reply text
-    text = (
-        f"📊 **Projection Results ({months} Months)** 📊\n\n"
-        f"Starting Portfolio: {current_portfolio_value:,.0f} VND\n"
-        f"Monthly Added: {monthly_contribution:,.0f} VND\n"
-        f"Total Capital Invested: {stats['capital']:,.0f} VND\n\n"
-        f"📉 Worst Case (10%): {stats['p10']:,.0f} VND\n"
-        f"📈 **Expected (Median): {stats['median']:,.0f} VND**\n"
-        f"🚀 Best Case (90%): {stats['p90']:,.0f} VND"
-    )
-    
-    bot.send_photo(message.chat.id, photo=chart_buf, caption=text, parse_mode="Markdown")
+    paths = run_monte_carlo(summary['total_current'], monthly, months=months)
+    chart, stats = generate_projection_chart(paths, monthly)
+    text = (f"📊 **Projection ({months}m)**\n"
+            f"Capital: {stats['capital']:,.0f}\n"
+            f"Worst(10%): {stats['p10']:,.0f}\n"
+            f"**Median: {stats['median']:,.0f}**\n"
+            f"Best(90%): {stats['p90']:,.0f}")
+    bot.send_photo(message.chat.id, photo=chart, caption=text, parse_mode="Markdown")
 
 @bot.message_handler(commands=["liquidate"])
 def cmd_liquidate(message: Message):
@@ -329,7 +267,7 @@ def cmd_liquidate(message: Message):
         return
     parts = message.text.split()
     if len(parts) < 3:
-        bot.reply_to(message, "Usage: /liquidate <asset_id> <sell_price>")
+        bot.reply_to(message, "/liquidate <asset_id> <sell_price>")
         return
     try:
         aid = int(parts[1])
@@ -338,61 +276,37 @@ def cmd_liquidate(message: Message):
         bot.reply_to(message, "Invalid asset ID or price.")
         return
     result = liquidate_asset(aid, price)
-    if result is None:
+    if not result:
         bot.reply_to(message, "Asset not found.")
         return
-    bot.reply_to(
-        message,
+    bot.reply_to(message,
         f"Liquidated {result['asset_name']}.\n"
-        f"Sold for: {result['sell_price']:,.0f}\n"
-        f"Remaining book value: {result['remaining_value']:,.0f}\n"
-        f"Gain/Loss: {result['gain_loss']:+,.0f}",
-    )
+        f"Sold: {result['sell_price']:,.0f}\n"
+        f"Book value: {result['remaining_value']:,.0f}\n"
+        f"Gain/Loss: {result['gain_loss']:+,.0f}")
 
 @bot.message_handler(commands=["export"])
 def cmd_export(message: Message):
     if not is_admin(message.from_user.id):
         return
-    bot.reply_to(message, "Generating Excel file, please wait...")
+    bot.reply_to(message, "Generating Excel...")
     txs = get_transactions(0, 10000, 0)
-    
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Transactions"
-    
-    headers = ["ID", "Date", "Amount", "Category", "Description", "Is Asset"]
-    ws.append(headers)
-    
+    ws.append(["ID", "Date", "Amount", "Category", "Description", "Is Asset"])
     for tx in txs:
-        ws.append([
-            tx["id"],
-            tx["transaction_date"],
-            tx["amount"],
-            tx["category"],
-            tx["description"],
-            "Yes" if tx["is_asset"] else "No"
-        ])
-        
+        ws.append([tx["id"], tx["transaction_date"], tx["amount"],
+                   tx["category"], tx["description"],
+                   "Yes" if tx["is_asset"] else "No"])
     for col in ws.columns:
-        max_length = 0
-        column = col[0].column_letter
-        for cell in col:
-            try:
-                if len(str(cell.value)) > max_length:
-                    max_length = len(str(cell.value))
-            except:
-                pass
-        ws.column_dimensions[column].width = max_length + 2
-
-    excel_file = io.BytesIO()
-    wb.save(excel_file)
-    excel_file.seek(0)
-    
-    bot.send_document(
-        message.chat.id,
-        document=excel_file,
-        visible_file_name=f"finance_export_{datetime.now().strftime('%Y%m%d')}.xlsx"
-    )
+        max_len = max((len(str(c.value or "")) for c in col), default=0)
+        ws.column_dimensions[col[0].column_letter].width = max_len + 2
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    bot.send_document(message.chat.id, document=buf,
+                      visible_file_name=f"finance_{datetime.now():%Y%m%d}.xlsx")
 
 @bot.message_handler(commands=["buy"])
 def cmd_buy(message: Message):
@@ -400,94 +314,77 @@ def cmd_buy(message: Message):
         return
     parts = message.text.split(maxsplit=3)
     if len(parts) < 4:
-        bot.reply_to(message, "Usage: /buy <asset_name> <quantity> <price_per_unit>\nExample: /buy VNM 100 65000")
+        bot.reply_to(message, "/buy <name> <qty> <price>\n/buy VNM 100 65000")
         return
-    
-    asset_name = parts[1]
+    name = parts[1]
     try:
         qty = float(parts[2])
         price = parse_amount(parts[3])
-        total_value = qty * price
+        total = qty * price
     except ValueError:
         bot.reply_to(message, "Invalid quantity or price.")
         return
-    
-    # Add transaction for expense
-    tid = add_transaction(message.from_user.id, -total_value, "investment", f"Buy {qty} {asset_name} @ {price}", is_asset=1)
-    
-    aid = add_asset(message.from_user.id, tid, asset_name, total_value, 1)
-    bot.reply_to(message, f"✅ Bought {qty} of {asset_name} for total {total_value:,.0f} VND.\nAsset tracked!")
+    tid = add_transaction(message.from_user.id, -total, "investment",
+                          f"Buy {qty} {name} @ {price}", is_asset=1)
+    add_asset(message.from_user.id, tid, name, total, 1)
+    bot.reply_to(message, f"✅ Bought {qty} {name} for {total:,.0f} VND.")
 
 @bot.message_handler(commands=["sell"])
 def cmd_sell(message: Message):
     if not is_admin(message.from_user.id):
         return
-    bot.reply_to(message, "To sell, use /liquidate <asset_id> <sell_price> for now.")
+    bot.reply_to(message, "Use /liquidate <asset_id> <sell_price>")
 
 @bot.message_handler(commands=["ping"])
 def cmd_ping(message: Message):
     if not is_admin(message.from_user.id):
         return
-    bot.reply_to(message, "pong 🏓")
+    bot.reply_to(message, "pong")
 
 @bot.message_handler(commands=["dbcheck"])
 def cmd_dbcheck(message: Message):
     if not is_admin(message.from_user.id):
         return
-    from database import get_db, count_transactions
     conn = get_db()
-    txn_count = conn.execute("SELECT COUNT(*) as c FROM transactions").fetchone()["c"]
-    asset_count = conn.execute("SELECT COUNT(*) as c FROM assets").fetchone()["c"]
-    active_assets = conn.execute("SELECT COUNT(*) as c FROM assets WHERE is_active=1").fetchone()["c"]
-    db_size = os.path.getsize(DATABASE_PATH) if os.path.exists(DATABASE_PATH) else 0
+    txn = conn.execute("SELECT COUNT(*) as c FROM transactions").fetchone()["c"]
+    ast = conn.execute("SELECT COUNT(*) as c FROM assets").fetchone()["c"]
+    act = conn.execute("SELECT COUNT(*) as c FROM assets WHERE is_active=1").fetchone()["c"]
+    db_sz = os.path.getsize(DATABASE_PATH) if os.path.exists(DATABASE_PATH) else 0
     conn.close()
-    lines = [
-        "🗄️ *Database Info*",
-        f"  Transactions: {txn_count}",
-        f"  Assets: {asset_count} (active: {active_assets})",
-        f"  DB size: {db_size / 1024:.1f} KB",
-    ]
-    bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
+    bot.reply_to(message,
+        f"DB: {txn} txns, {ast} assets ({act} active), {db_sz/1024:.1f} KB",
+        parse_mode="Markdown")
 
 @bot.message_handler(commands=["gscheck"])
 def cmd_gscheck(message: Message):
     if not is_admin(message.from_user.id):
         return
-    from gsheets_reader import get_gspread_client, read_expenses_from_sheet, read_portfolio_from_sheet
+    from gsheets_reader import get_gspread_client
     client, err = get_gspread_client()
     if not client:
         bot.reply_to(message, f"❌ Google Sheets auth failed: {err}")
         return
-    exp_data, exp_err = read_expenses_from_sheet()
-    port_data, port_err = read_portfolio_from_sheet()
+    ed, ee = read_expenses_from_sheet()
+    pd, pe = read_portfolio_from_sheet()
     lines = ["✅ *Google Sheets OK*", ""]
-    if exp_data is not None:
-        lines.append(f"📄 Expenses: {len(exp_data)} rows")
-    else:
-        lines.append(f"⚠️ Expenses: {exp_err}")
-    if port_data is not None:
-        lines.append(f"💼 Portfolio: {len(port_data)} rows")
-    else:
-        lines.append(f"⚠️ Portfolio: {port_err}")
+    lines.append(f"Expenses: {len(ed)} rows" if ed else f"⚠️ {ee}")
+    lines.append(f"Portfolio: {len(pd)} rows" if pd else f"⚠️ {pe}")
     bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
 
 @bot.message_handler(commands=["envcheck"])
 def cmd_envcheck(message: Message):
     if not is_admin(message.from_user.id):
         return
-    from config import TELEGRAM_TOKEN, WEBHOOK_URL, GOOGLE_CREDENTIALS_FILE, EXPENSE_SHEET_NAME, PORTFOLIO_SHEET_NAME, GEMINI_API_KEY
+    from config import GEMINI_API_KEY, GOOGLE_CREDENTIALS_FILE, EXPENSE_SHEET_NAME, PORTFOLIO_SHEET_NAME
     def mask(s):
-        if not s:
-            return "<empty>"
+        if not s: return "<empty>"
         return s[:6] + "..." + s[-4:] if len(s) > 12 else s[:3] + "..."
     lines = [
-        "⚙️ *Environment Check*",
+        "⚙️ *Environment*",
         f"  WEBHOOK_URL: {WEBHOOK_URL or '<empty>'}",
         f"  TELEGRAM_TOKEN: {mask(TELEGRAM_TOKEN)}",
         f"  GEMINI_API_KEY: {mask(GEMINI_API_KEY)}",
         f"  GOOGLE_CREDENTIALS: {os.path.exists(GOOGLE_CREDENTIALS_FILE)}",
-        f"  EXPENSE_SHEET: {EXPENSE_SHEET_NAME}",
-        f"  PORTFOLIO_SHEET: {PORTFOLIO_SHEET_NAME}",
     ]
     bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
 
@@ -498,19 +395,15 @@ def cmd_logs(message: Message):
     parts = message.text.split()
     n = 20
     if len(parts) >= 2:
-        try:
-            n = int(parts[1])
-            n = min(n, 100)
-        except ValueError:
-            pass
+        try: n = min(int(parts[1]), 100)
+        except ValueError: pass
     log_file = os.path.join(os.path.dirname(__file__), "bot.log")
     if not os.path.exists(log_file):
-        bot.reply_to(message, "Không tìm thấy file bot.log")
+        bot.reply_to(message, "No bot.log found")
         return
     with open(log_file, "r", encoding="utf-8") as f:
         lines = f.readlines()
-    last_lines = lines[-n:]
-    text = f"📋 *Last {len(last_lines)} log lines*:\n```\n" + "".join(last_lines)[-3000:] + "\n```"
+    text = "📋 *Last logs*:\n```\n" + "".join(lines[-n:])[-3000:] + "\n```"
     bot.reply_to(message, text, parse_mode="Markdown")
 
 @bot.message_handler(commands=["navtest"])
@@ -519,19 +412,15 @@ def cmd_navtest(message: Message):
         return
     parts = message.text.split()
     if len(parts) < 2:
-        bot.reply_to(message, "Cách dùng: `/navtest <ticker>`\nVD: `/navtest DCDS`", parse_mode="Markdown")
+        bot.reply_to(message, "/navtest <ticker>\nVD: /navtest DCDS")
         return
     ticker = parts[1].upper()
-    msg = bot.reply_to(message, f"Đang test NAV cho {ticker}...")
-    nav, nav_date, err = fetch_nav_from_vnsignal(ticker)
+    msg = bot.reply_to(message, f"Testing NAV for {ticker}...")
+    nav, dt, err = fetch_nav_from_vnsignal(ticker)
     if err:
         bot.edit_message_text(f"❌ {err}", msg.chat.id, msg.message_id)
         return
-    bot.edit_message_text(
-        f"✅ *{ticker}* — NAV: `{nav:,.0f} VND`\n"
-        f"  Ngày: {nav_date or 'N/A'}",
-        msg.chat.id, msg.message_id, parse_mode="Markdown"
-    )
+    bot.edit_message_text(f"✅ {ticker}: `{nav:,.0f}` ({dt})", msg.chat.id, msg.message_id, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: True)
 def handle_main_message(message: Message):
@@ -540,177 +429,103 @@ def handle_main_message(message: Message):
 
     uid = message.from_user.id
     text = message.text.strip()
-
-    # Check if user is in capitalize flow (SQLite-backed state)
     loaded = load_state(uid)
+
+    # --- State: pending_bank (user typing bank name) ---
+    if "pending_bank" in loaded:
+        bank_text = text.upper()
+        bank = next((b for b in VALID_BANKS if b in bank_text or bank_text in b), None)
+        if not bank:
+            bot.reply_to(message, f"Invalid bank. Choose: {', '.join(VALID_BANKS)}")
+            return
+        state = loaded["pending_bank"]
+        tid = add_transaction(uid, state["amount"], state["category"], state["desc"],
+                              is_asset=0, bank_account=bank)
+        clear_state(uid)
+        bal = get_balance()
+        if state["amount"] < -199:
+            save_state(uid, {"pending_capitalize_decision": {"tid": tid, "value": abs(state["amount"])}})
+            bot.send_message(uid,
+                f"✅ Recorded: {state['amount']:+,.0f} - {state['desc']} ({bank})\n"
+                f"Balance: {bal:,.0f}\n\n"
+                f"Capitalize as asset? (yes/no)")
+        else:
+            bot.send_message(uid, f"✅ Recorded: {state['amount']:+,.0f} - {state['desc']} ({bank})\nBalance: {bal:,.0f}")
+        return
+
+    # --- State: pending_capitalize_decision (user typing yes/no) ---
+    if "pending_capitalize_decision" in loaded:
+        affirm = text.lower() in ("yes", "y", "có", "co", "ye", "ok", "oke", "đồng ý", "dong y")
+        if affirm:
+            state = loaded["pending_capitalize_decision"]
+            save_state(uid, {"pending_capitalize": {"tid": state["tid"], "value": state["value"], "step": "ask_name"}})
+            bot.reply_to(message, "What is the asset name? (e.g. MacBook Pro 14)")
+        else:
+            clear_state(uid)
+            bot.reply_to(message, "Saved as regular expense.")
+        return
+
+    # --- State: pending_capitalize (asset name / months flow) ---
     cap = loaded.get("pending_capitalize")
     if cap and cap != "None":
         handle_capitalize_step(message, uid, cap)
         return
 
-    # Thử gọi LLM
+    # --- Parse transaction text ---
     parsed = parse_transaction(text)
-    
-    amount = None
-    desc = None
-    cat = None
-    bank = None
-    is_transfer = False
-    from_bank = None
-    to_bank = None
+    source = "gemini"
+    if not parsed or "amount" not in parsed or parsed["amount"] is None:
+        parsed = parse_transaction_local(text)
+        source = "local"
 
-    if parsed and "amount" in parsed and parsed["amount"] is not None:
-        try:
-            amount = float(parsed["amount"])
-            if parsed.get("action") == "expense":
-                amount = -abs(amount)
-            elif parsed.get("action") == "income":
-                amount = abs(amount)
-            elif parsed.get("action") == "transfer":
-                is_transfer = True
-                from_bank = parsed.get("from_bank")
-                to_bank = parsed.get("to_bank")
-                
-            desc = parsed.get("description", text)
-            cat = parsed.get("category", guess_category(desc))
-            bank = parsed.get("bank")
-        except ValueError:
-            parsed = None # Bị lỗi cast số thì rớt xuống fallback
-            
-    if not amount:
-        # Fallback to Regex
-        match = re.match(r"^([+-])\s*([\d.,kKtTrR]+)\s*(.*)", text)
-        if not match:
-            bot.reply_to(
-                message,
-                "Lỗi phân tích cú pháp hoặc Gemini API không phản hồi.\n"
-                "Sử dụng Format chuẩn: +<amount> <description> hoặc -<amount> <description>\n"
-                "Ví dụ: +500 lương, -200 ăn trưa, -10tr mua laptop",
-            )
-            return
-
-        sign = match.group(1)
-        raw_amount = match.group(2)
-        desc = match.group(3).strip()
-
-        try:
-            amount = parse_amount(raw_amount)
-        except ValueError:
-            bot.reply_to(message, "Sai định dạng số tiền.")
-            return
-
-        if sign == "-":
-            amount = -amount
-            
-        cat = guess_category(desc)
-        if cat == "transfer":
-            is_transfer = True
-
-    # Process Transfer
-    if is_transfer:
-        if not from_bank or not to_bank:
-            bot.reply_to(message, f"Giao dịch: Chuyển tiền\nSố tiền: {abs(amount):,.0f}\nLỗi: AI không nhận diện được ngân hàng gửi và nhận. Hãy thử nói rõ hơn, vd: 'chuyển 50k từ VCB sang CASH'")
-            return
-            
-        tid_from = add_transaction(uid, -abs(amount), "transfer", desc, is_asset=0, bank_account=from_bank)
-        tid_to = add_transaction(uid, abs(amount), "transfer", desc, is_asset=0, bank_account=to_bank)
-        bot.reply_to(message, f"✅ Đã chuyển {abs(amount):,.0f} VND từ {from_bank} sang {to_bank}.")
+    if not parsed or parsed.get("amount") is None:
+        bot.reply_to(message,
+            f"Could not parse: \"{text}\"\n"
+            f"Try: +500 salary, -200 lunch, chuyển 5tr từ VCB sang ACB")
         return
 
-    # Normal Expense / Income
+    try:
+        amount = float(parsed["amount"])
+        action = parsed.get("action", "expense")
+        desc = parsed.get("description", text)
+        cat = parsed.get("category", "other")
+        bank = parsed.get("bank")
+        from_bank = parsed.get("from_bank") if action == "transfer" else None
+        to_bank = parsed.get("to_bank") if action == "transfer" else None
+    except (ValueError, TypeError):
+        bot.reply_to(message, "Invalid transaction data.")
+        return
+
+    if action == "income":
+        amount = abs(amount)
+    elif action == "expense":
+        amount = -abs(amount)
+
+    logger.info(f"[{source}] {text} -> action={action} amount={amount} cat={cat} bank={bank}")
+
+    # --- TRANSFER ---
+    if action == "transfer" and from_bank and to_bank:
+        add_transaction(uid, -abs(amount), "transfer", desc, is_asset=0, bank_account=from_bank)
+        add_transaction(uid, abs(amount), "transfer", desc, is_asset=0, bank_account=to_bank)
+        bot.reply_to(message, f"✅ Transferred {abs(amount):,.0f} from {from_bank} to {to_bank}.")
+        return
+
+    # --- INCOME / EXPENSE with bank ---
     if bank:
         tid = add_transaction(uid, amount, cat, desc, is_asset=0, bank_account=bank)
-        bot.reply_to(message, f"✅ Đã lưu: {amount:+,.0f} - {desc} ({bank})\nSố dư: {get_balance():,.0f}")
-        return
-
-    save_state(uid, {
-        "pending_tx": {
-            "amount": amount,
-            "category": cat,
-            "description": desc,
-        }
-    })
-
-    markup = InlineKeyboardMarkup()
-    markup.add(
-        InlineKeyboardButton("VCB", callback_data="bank_VCB"),
-        InlineKeyboardButton("ACB", callback_data="bank_ACB"),
-        InlineKeyboardButton("HDBANK", callback_data="bank_HDBANK"),
-        InlineKeyboardButton("CASH", callback_data="bank_CASH")
-    )
-    
-    bot.reply_to(
-        message,
-        f"Amount: {amount:+,.0f}\nDesc: {desc}\n\nXin hãy chọn tài khoản:",
-        reply_markup=markup
-    )
-
-@bot.callback_query_handler(func=lambda c: True)
-def handle_callback(call):
-    uid = call.from_user.id
-    now = time.time()
-    if now - _callback_cooldown.get(uid, 0) < 1.5:
-        bot.answer_callback_query(call.id, "⏳ Please wait...")
-        return
-    _callback_cooldown[uid] = now
-    data = call.data
-
-    if data.startswith("bank_"):
-        bank = data.split("_")[1]
-        loaded = load_state(uid)
-        state = loaded.get("pending_tx")
-        if not state:
-            bot.answer_callback_query(call.id, "Session expired.")
-            return
-            
-        amount = state["amount"]
-        desc = state["description"]
-        cat = state["category"]
-        
-        tid = add_transaction(uid, amount, cat, desc, is_asset=0, bank_account=bank)
-        
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        
-        if amount < -200:
-            markup = InlineKeyboardMarkup()
-            markup.add(
-                InlineKeyboardButton("Yes - capitalize", callback_data=f"cap_{tid}_{abs(amount)}"),
-                InlineKeyboardButton("No", callback_data=f"nocap_{tid}"),
-            )
-            bot.send_message(
-                uid,
-                f"Recorded: {amount:+,.0f} - {desc} ({bank})\n\n"
-                f"Is this an asset to capitalize (depreciate over time)?",
-                reply_markup=markup,
-            )
+        bal = get_balance()
+        if amount < -199:
+            save_state(uid, {"pending_capitalize_decision": {"tid": tid, "value": abs(amount)}})
+            bot.reply_to(message,
+                f"✅ Recorded: {amount:+,.0f} - {desc} ({bank})\n"
+                f"Balance: {bal:,.0f}\n\n"
+                f"Capitalize as asset? (yes/no)")
         else:
-            bal = get_balance()
-            bot.send_message(
-                uid,
-                f"Recorded: {amount:+,.0f} - {desc} ({bank})\nBalance: {bal:,.0f}",
-            )
-            
-        clear_state(uid)
-        bot.answer_callback_query(call.id)
+            bot.reply_to(message, f"✅ Recorded: {amount:+,.0f} - {desc} ({bank})\nBalance: {bal:,.0f}")
+        return
 
-    elif data.startswith("cap_"):
-        parts = data.split("_")
-        tid = int(parts[1])
-        asset_value = float(parts[2])
-        save_state(uid, {
-            "pending_capitalize": {"tid": tid, "value": asset_value, "step": "ask_name"}
-        })
-        bot.send_message(uid, "Asset name (e.g. MacBook Pro 14):")
-        bot.answer_callback_query(call.id)
-
-    elif data.startswith("nocap_"):
-        bot.send_message(uid, "Saved as regular expense.")
-        bot.answer_callback_query(call.id)
-
-    elif data == "cancel_capitalize":
-        clear_state(uid)
-        bot.send_message(uid, "Cancelled.")
-        bot.answer_callback_query(call.id)
+    # --- No bank yet -> ask ---
+    ask_bank(uid, amount, cat, desc)
 
 def handle_capitalize_step(message, uid, cap):
     step = cap.get("step")
@@ -730,73 +545,35 @@ def handle_capitalize_step(message, uid, cap):
         tid = cap["tid"]
         name = cap["name"]
         value = cap["value"]
-        aid = add_asset(uid, tid, name, value, months)
-        from database import get_db
+        add_asset(uid, tid, name, value, months)
         conn = get_db()
         conn.execute("UPDATE transactions SET is_asset = 1 WHERE id = ?", (tid,))
         conn.commit()
         conn.close()
-        bot.reply_to(
-            message,
-            f"Asset capitalized!\n"
-            f"Name: {name}\n"
-            f"Value: {value:,.0f}\n"
-            f"Depreciation: {months} months\n"
-            f"Monthly: {value / months:,.0f}\n\n"
-            f"Use /asset to track it.",
-        )
+        bot.reply_to(message,
+            f"✅ Asset capitalized!\n"
+            f"Name: {name}\nValue: {value:,.0f}\n"
+            f"Depreciation: {months} months\nMonthly: {value/months:,.0f}\n\n"
+            f"Use /asset to track it.")
         clear_state(uid)
 
 def guess_category(desc):
     desc_lower = desc.lower()
     categories = {
-        "food": [
-            "food", "eat", "lunch", "dinner", "breakfast", "grocer", "ăn", "uống", "cơm", "phở", "bún", "hủ tiếu", "cháo",
-            "miến", "mì", "bánh", "trà sữa", "cafe", "cà phê", "nước", "nhậu", "hải sản", "lẩu", "nướng", "kfc", "lotteria",
-            "highland", "starbucks", "phúc long", "phuc long", "thức ăn", "thực phẩm", "siêu thị", "chợ", "rau", "thịt", "cá",
-            "trái cây", "hoa quả", "kẹo", "snack", "gà", "bò", "heo", "trưa", "tối", "sáng", "khuya", "ăn vặt", "nấu",
-            "pizza", "burger", "mcdonald", "tocotoco", "gongcha", "koi", "the coffee house", "tch", "bạch tuộc", "sushi", "sashimi"
-        ],
-        "transport": [
-            "transport", "taxi", "grab", "bus", "fuel", "gas", "parking", "xăng", "xe", "di chuyển", "đi lại", "vé", "tàu",
-            "máy bay", "gojek", "be", "xanh sm", "gọi xe", "đỗ xe", "gửi xe", "rửa xe", "bảo dưỡng", "sửa xe", "nhớt",
-            "thay nhớt", "cầu đường", "bot", "vetch", "epass", "grabcar", "grabbike", "xe ôm", "phà", "trạm thu phí"
-        ],
-        "salary": [
-            "salary", "income", "bonus", "wage", "lương", "thưởng", "thu nhập", "nhận", "cấp", "lì xì", "bán", "tiền vô",
-            "lãi", "cổ tức", "hoa hồng", "dự án", "freelance", "trả nợ", "hoàn tiền", "cashback", "tạm ứng", "phụ cấp"
-        ],
-        "entertainment": [
-            "entertain", "movie", "game", "netflix", "spotify", "giải trí", "phim", "cgv", "lotte", "bhd", "chơi", "du lịch",
-            "đi chơi", "hát", "karaoke", "bar", "pub", "club", "kịch", "nhạc", "youtube", "premium", "nạp", "steam",
-            "thú cưng", "mèo", "chó", "pet", "hẹn hò", "date", "đồ chơi", "tour", "khách sạn", "resort", "bida", "massage"
-        ],
-        "bill": [
-            "bill", "electric", "water", "internet", "phone", "rent", "điện", "nước", "mạng", "wifi", "cáp", "viễn thông",
-            "viettel", "fpt", "vnpt", "mobifone", "vinaphone", "thuê bao", "tiền nhà", "thuê nhà", "trọ", "phí quản lý",
-            "chung cư", "bảo vệ", "rác", "trả góp", "tín dụng", "credit", "thẻ", "khoản vay", "fe credit", "bảo hiểm", "vay"
-        ],
-        "health": [
-            "health", "doctor", "medicine", "hospital", "gym", "khám", "bệnh", "thuốc", "nhà thuốc", "pharmacity", "long châu",
-            "bác sĩ", "nha khoa", "răng", "mắt", "kính", "tập", "thể thao", "yoga", "fitness", "cali", "thực phẩm chức năng",
-            "vitamin", "bảo hiểm y tế", "viện phí", "xét nghiệm", "sức khỏe", "massage", "spa", "chăm sóc"
-        ],
-        "shopping": [
-            "shop", "buy", "purchase", "cloth", "shoe", "mua sắm", "quần", "áo", "giày", "dép", "túi", "ví", "balo",
-            "mỹ phẩm", "skincare", "son", "shopee", "lazada", "tiki", "tiktok", "siêu thị", "coop", "winmart", "go!",
-            "bigc", "bách hóa", "đồ gia dụng", "điện máy", "thế giới di động", "tgdd", "fpt shop", "cellphones", "điện thoại",
-            "laptop", "phụ kiện", "tai nghe", "ốp lưng", "cáp", "sạc", "quà", "tặng", "hoa", "đồ", "sách", "fahasa"
-        ],
-        "transfer": [
-            "chuyển", "rút", "transfer", "atm", "tiền mặt"
-        ]
+        "food": ["ăn", "uống", "cơm", "phở", "bún", "cafe", "lunch", "dinner", "trưa", "tối", "sáng"],
+        "transport": ["xe", "xăng", "grab", "taxi", "bus", "vé", "tàu", "đi"],
+        "salary": ["lương", "thưởng", "thu nhập", "nhận", "lãi", "bán"],
+        "entertainment": ["phim", "game", "movie", "netflix", "chơi", "karaoke"],
+        "bill": ["điện", "nước", "mạng", "internet", "thuê", "trả", "phone"],
+        "health": ["bệnh", "thuốc", "khám", "bác sĩ", "gym"],
+        "shopping": ["mua", "shop", "áo", "quần", "giày", "shopee", "laptop"],
+        "transfer": ["chuyển", "rút", "nạp"],
     }
     for cat, keywords in categories.items():
         for kw in keywords:
             if kw in desc_lower:
                 return cat
     return "other"
-
 
 def set_webhook():
     bot.remove_webhook()
