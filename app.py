@@ -98,7 +98,8 @@ def assets_page():
 @app.route("/reports")
 def reports_page():
     report = get_full_report(WEB_USER_ID)
-    return render_template("reports.html", report=report)
+    assets = get_asset_summary(WEB_USER_ID)
+    return render_template("reports.html", report=report, assets=assets)
 
 
 @app.route("/settings")

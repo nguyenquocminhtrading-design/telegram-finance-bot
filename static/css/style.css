@@ -272,6 +272,8 @@ body {
 .table-wrap {
     width: 100%;
     overflow-x: auto;
+    max-height: 360px;
+    overflow-y: auto;
 }
 
 .table-wrap table {
@@ -300,10 +302,20 @@ body {
     box-shadow: 0 4px 15px rgba(0,0,0,0.02);
 }
 
+.chart-card canvas,
+.chart-container canvas {
+    width: 100% !important;
+    max-height: 320px;
+}
+
 .chart-card h3 {
     font-size: 1.05rem;
     font-weight: 600;
     margin-bottom: 14px;
+}
+
+.chart-card table {
+    min-width: 100%;
 }
 
 table {
@@ -515,6 +527,11 @@ th, td {
         border-radius: 16px;
         padding: 18px;
     }
+
+    .chart-card {
+        border-radius: 16px;
+        padding: 18px;
+    }
 }
 
 @media (max-width: 640px) {
@@ -549,6 +566,11 @@ th, td {
 
     .header-bar {
         margin-bottom: 16px;
+    }
+
+    .chart-card canvas,
+    .chart-container canvas {
+        max-height: 240px;
     }
 
     .top-header h1 {
