@@ -19,4 +19,7 @@ PORTFOLIO_SHEET_NAME = os.getenv("PORTFOLIO_SHEET_NAME", "My Portfolio")
 # Gemini API
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
+# Groq API (fallback khi Gemini chết)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
 os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)

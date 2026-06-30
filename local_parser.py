@@ -4,6 +4,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+VALID_BANK_NAMES = {"VCB", "ACB", "HDBANK", "CASH", "MOMO"}
+
 BANK_KEYWORDS = {
     "VCB": ["vcb", "vietcombank", "vietcom"],
     "ACB": ["acb", "asia commercial"],
@@ -68,20 +70,25 @@ AMOUNT_PATTERNS = [
 ]
 
 # Matches: "chuyển 2tr từ VCB sang ACB" / "chuyển 500k từ acb vào momo"
+# Dùng \S+ thay cho ký tự có dấu cụ thể để tránh lỗi Unicode
 TRANSFER_PATTERN = re.compile(
-    r'(?:chuy[eê]n|r[uú]t|n[aạ]p|g[uử]i|chuy[eê]n\s*kho[aả]n)\s+'
-    r'([\d]+(?:[.,][\d]+)?(?:\s*(?:tr(?:i[eê]u)?|k|nghìn))?)\s*'
-    r'(?:t[uừừ]|[oở])\s*([\w]+)\s+'
-    r'(?:sang|[dđ][eế]n|v[aà]o|[dđ]i|qua|cho)\s*([\w]+)',
-    re.IGNORECASE | re.UNICODE,
+    r'(?:chuy\S*n|r\S*t|n\S+p|g\S+i)\s+'
+    r'([\d]+(?:[.,][\d]+)?(?:\s*(?:tr(?:\S*)?|k|nghìn))?)\s*'
+    r't\S*\s+'
+    r'(\w+)\s+'
+    r'(?:sang|d\S*n|v\S+o|qua|cho)\s*'
+    r'(\w+)',
+    re.IGNORECASE,
 )
 
 # Matches: "rút 2tr từ VCB" (destination defaults to CASH)
+# Matches: "nạp 2tr VCB" (source defaults to CASH)
 TRANSFER_SHORT_PATTERN = re.compile(
-    r'(?:r[uú]t|n[aạ]p)\s+'
-    r'([\d]+(?:[.,][\d]+)?(?:\s*(?:tr(?:i[eê]u)?|k|nghìn))?)\s*'
-    r'(?:t[uừừ]|[oở])\s*([\w]+)',
-    re.IGNORECASE | re.UNICODE,
+    r'(?:r\S*t|n\S+p)\s+'
+    r'([\d]+(?:[.,][\d]+)?(?:\s*(?:tr(?:\S*)?|k|nghìn))?)\s*'
+    r'(?:t\S*)?\s*'
+    r'(\w+)',
+    re.IGNORECASE,
 )
 
 
@@ -150,11 +157,26 @@ def parse_transaction_local(text):
         logger.info(f"Local: detected withdrawal from {result['from_bank']}, amount={result['amount']}")
         return result
 
+    # 2b. Fallback transfer: "chuyển ... VCB ... ACB" nếu regex Unicode fail
+    if not forced_action and 'chuy' in text_lower:
+        words = re.findall(r'[A-Za-z]+', text_original)
+        banks_found = []
+        for w in words:
+            bank = resolve_bank(w)
+            if bank and bank in VALID_BANK_NAMES:
+                banks_found.append(bank)
+        if len(banks_found) >= 2:
+            result["action"] = "transfer"
+            result["from_bank"] = banks_found[0]
+            result["to_bank"] = banks_found[1]
+            result["description"] = f"Chuyển từ {banks_found[0]} sang {banks_found[1]}"
+            logger.info(f"Local: fallback transfer {banks_found[0]} -> {banks_found[1]} amount={result['amount']}")
+
     # 3. Extract amount
     result["amount"] = parse_amount_local(text)
 
-    # 4. Detect INCOME (nếu chưa có forced_action từ dấu + / -)
-    if not forced_action:
+    # 4. Detect INCOME (nếu chưa có forced_action từ dấu + / -, và không phải transfer)
+    if not forced_action and result["action"] != "transfer":
         income_score = sum(1 for kw in ACTION_KEYWORDS["income"] if kw in text_lower)
         expense_score = sum(1 for kw in ["mua", "ăn", "đi", "trả", "đóng", "chi"] if kw in text_lower)
         if income_score > 0 and income_score >= expense_score:

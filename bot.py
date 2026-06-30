@@ -20,7 +20,8 @@ from gsheets_reader import sync_all_from_sheets, full_sync_from_sheets, read_exp
 from gsheets_sync import sync_expense_to_gsheet, sync_transfer_to_gsheet
 from simulation import run_monte_carlo, generate_projection_chart
 from nav_fetcher import fetch_nav_from_vnsignal, update_asset_nav, refresh_all_assets
-from llm_parser import parse_transaction
+from llm_parser import parse_transaction as parse_gemini
+from groq_parser import parse_transaction as parse_groq
 from local_parser import parse_transaction_local
 from telebot.formatting import escape_markdown
 
@@ -784,9 +785,12 @@ def handle_main_message(message: Message):
         handle_capitalize_step(message, uid, cap)
         return
 
-    # --- Parse transaction text ---
-    parsed = parse_transaction(text)
+    # --- Parse transaction text: Gemini → Groq → local ---
+    parsed = parse_gemini(text)
     source = "gemini"
+    if not parsed or "amount" not in parsed or parsed["amount"] is None:
+        parsed = parse_groq(text)
+        source = "groq"
     if not parsed or "amount" not in parsed or parsed["amount"] is None:
         parsed = parse_transaction_local(text)
         source = "local"
