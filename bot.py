@@ -57,8 +57,9 @@ def safe_api(func):
         return None
     return wrapper
 
-safe_send = safe_api(bot.send_message)
-safe_reply = safe_api(bot.reply_to)
+# Monkey-patch để mọi lời gọi bot.send_message đều có timeout + retry
+bot.send_message = safe_api(bot.send_message)
+# bot.reply_to gọi nội bộ self.send_message → tự động an toàn
 
 def is_admin(user_id):
     return ADMIN_USER_ID == 0 or user_id == ADMIN_USER_ID
