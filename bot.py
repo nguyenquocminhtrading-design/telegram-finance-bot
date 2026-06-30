@@ -182,9 +182,10 @@ def cmd_help(message: Message):
         "📊 *FINANCE BOT — HƯỚNG DẪN* 📊\n"
         "─────────────────────────────\n"
         "🗣 *Nhắn tự nhiên (không cần lệnh):*\n"
-        "  `-70 xăng vcb` — chi tiêu\n"
-        "  `nhận lương 15tr acb` — thu nhập\n"
-        "  `ăn cơm 50k` — bot tự hỏi tài khoản\n\n"
+        "  `+500 lương vcb` — tiền vào (dấu `+` = thu nhập)\n"
+        "  `-70 xăng vcb` — tiền ra (dấu `-` = chi tiêu)\n"
+        "  `ăn cơm 50k` — bot tự hỏi tài khoản\n"
+        "  `nhận lương 15tr acb` — thu nhập tự động\n\n"
         "💸 *Chuyển tiền (2 cách):*\n"
         "  1️⃣ Nhắn: `chuyển 2tr từ VCB sang ACB`\n"
         "  2️⃣ Lệnh: `/transfer 2000000 VCB ACB`\n"
@@ -209,7 +210,7 @@ def cmd_help(message: Message):
         "  `/fullsync` — xóa SQLite và import lại từ Google Sheets\n"
         "  `/web` — link Web Dashboard\n\n"
         "🔧 *Debug:*\n"
-        "  `/ping` `/dbcheck` `/gscheck` `/envcheck` `/logs` `/navtest`\n\n"
+        "  `/ping` `/dbcheck` `/gscheck` `/envcheck` `/logs` `/navtest` `/webhook_info`\n\n"
         "💡 *Vốn hóa tài sản:*\n"
         "  Chi tiêu ≥ 200,000 VND → bot hỏi có vốn hóa không\n"
         "  Trả lời: `yes` hoặc `no`"
@@ -536,6 +537,26 @@ def cmd_ping(message: Message):
     if not is_admin(message.from_user.id):
         return
     bot.reply_to(message, "pong")
+
+@bot.message_handler(commands=["webhook_info"])
+def cmd_webhook_info(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    import requests
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getWebhookInfo", timeout=10)
+        data = r.json()
+        url = data.get("result", {}).get("url", "N/A")
+        pending = data.get("result", {}).get("pending_update_count", "N/A")
+        err = data.get("result", {}).get("last_error_message", "None")
+        bot.reply_to(message,
+            f"🌐 *Webhook Info*\n"
+            f"URL: `{url}`\n"
+            f"Pending: {pending}\n"
+            f"Error: {err}",
+            parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Lỗi: {e}")
 
 @bot.message_handler(commands=["dbcheck"])
 def cmd_dbcheck(message: Message):

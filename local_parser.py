@@ -110,8 +110,15 @@ def parse_transaction_local(text):
     text_lower = text.lower().strip()
     text_original = text.strip()
 
+    # Xác định income/expense từ dấu + / - đầu câu
+    forced_action = None
+    if text.startswith('+') and not text.startswith('++'):
+        forced_action = "income"
+    elif text.startswith('-') and not text.startswith('--'):
+        forced_action = "expense"
+
     result = {
-        "action": "expense",
+        "action": "income" if forced_action == "income" else "expense",
         "amount": None,
         "category": "other",
         "bank": None,
@@ -146,11 +153,12 @@ def parse_transaction_local(text):
     # 3. Extract amount
     result["amount"] = parse_amount_local(text)
 
-    # 4. Detect INCOME
-    income_score = sum(1 for kw in ACTION_KEYWORDS["income"] if kw in text_lower)
-    expense_score = sum(1 for kw in ["mua", "ăn", "đi", "trả", "đóng"] if kw in text_lower)
-    if income_score > 0 and income_score >= expense_score:
-        result["action"] = "income"
+    # 4. Detect INCOME (nếu chưa có forced_action từ dấu + / -)
+    if not forced_action:
+        income_score = sum(1 for kw in ACTION_KEYWORDS["income"] if kw in text_lower)
+        expense_score = sum(1 for kw in ["mua", "ăn", "đi", "trả", "đóng", "chi"] if kw in text_lower)
+        if income_score > 0 and income_score >= expense_score:
+            result["action"] = "income"
 
     # 5. Detect bank
     for bank, keywords in BANK_KEYWORDS.items():
