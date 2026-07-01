@@ -12,12 +12,12 @@ import openpyxl
 from config import TELEGRAM_TOKEN, ADMIN_USER_ID, WEBHOOK_URL, DATABASE_PATH
 from database import (
     add_transaction, add_transfer, get_bank_balance,
-    get_transactions, add_asset, save_state, load_state, clear_state, get_db
+    get_transactions, add_asset, save_state, load_state, clear_state, get_db, get_assets
 )
 from asset_manager import get_asset_summary, liquidate_asset
 from finance_logic import get_balance, get_monthly_summary, get_category_breakdown, get_all_bank_balances
 from gsheets_reader import sync_all_from_sheets, full_sync_from_sheets, read_expenses_from_sheet, read_portfolio_from_sheet
-from gsheets_sync import sync_expense_to_gsheet, sync_transfer_to_gsheet
+from gsheets_sync import sync_expense_to_gsheet, sync_transfer_to_gsheet, sync_asset_to_gsheet
 from simulation import run_monte_carlo, generate_projection_chart
 from nav_fetcher import fetch_nav_from_vnsignal, update_asset_nav, refresh_all_assets
 from llm_parser import parse_transaction as parse_gemini
@@ -200,8 +200,10 @@ def cmd_help(message: Message):
         "  `/setbalance <bank> <amount>` — đặt số dư ban đầu\n\n"
         "📦 *Tài sản:*\n"
         "  `/asset` — danh mục tài sản\n"
-        "  `/buy <tên> <số lượng> <giá>` — mua tài sản đầu tư\n"
-        "  `/liquidate <id> <giá>` — bán / thanh lý\n"
+        "  `/buy DCDS 10000000` — mua chứng chỉ quỹ (chỉ giá trị)\n"
+        "  `/buy VNM 100 65000` — mua cổ phiếu (qty × giá)\n"
+        "  `/sell DCDS 5000000` — bán theo tên (không cần ID)\n"
+        "  `/liquidate <id> <giá>` — bán / thanh lý theo ID\n"
         "  `/nav <id> [ticker]` — cập nhật NAV quỹ\n"
         "  `/refresh` — refresh NAV tất cả tài sản\n\n"
         "📊 *Công cụ:*\n"
@@ -476,6 +478,14 @@ def cmd_liquidate(message: Message):
     if not result:
         bot.reply_to(message, "Asset not found.")
         return
+    try:
+        sync_asset_to_gsheet({
+            "name": result["asset_name"],
+            "value": price,
+            "note": f"Liquidate {result['asset_name']}"
+        }, is_buy=False)
+    except Exception as e:
+        logger.warning(f"GSheet liquidate sync error: {e}")
     bot.reply_to(message,
         f"Liquidated {result['asset_name']}.\n"
         f"Sold: {result['sell_price']:,.0f}\n"
@@ -506,32 +516,101 @@ def cmd_export(message: Message):
     bot.send_document(message.chat.id, document=buf,
                       visible_file_name=f"finance_{datetime.now():%Y%m%d}.xlsx")
 
+FUND_NAMES = {"DCDS", "DCDE", "DCBF", "DCIP", "E1VFVN30", "FUEVFVND", "FUESSVFL"}
+
 @bot.message_handler(commands=["buy"])
 def cmd_buy(message: Message):
     if not is_admin(message.from_user.id):
         return
+    uid = message.from_user.id
     parts = message.text.split(maxsplit=3)
-    if len(parts) < 4:
-        bot.reply_to(message, "/buy <name> <qty> <price>\n/buy VNM 100 65000")
+    if len(parts) < 3:
+        bot.reply_to(
+            message,
+            "/buy DCDS 10000000  (chứng chỉ quỹ)\n"
+            "/buy VNM 100 65000  (cổ phiếu)")
         return
     name = parts[1]
-    try:
-        qty = float(parts[2])
-        price = parse_amount(parts[3])
-        total = qty * price
-    except ValueError:
-        bot.reply_to(message, "Invalid quantity or price.")
-        return
-    tid = add_transaction(message.from_user.id, -total, "investment",
-                          f"Buy {qty} {name} @ {price}", is_asset=1)
-    add_asset(message.from_user.id, tid, name, total, 1)
-    bot.reply_to(message, f"✅ Bought {qty} {name} for {total:,.0f} VND.")
+    name_upper = name.upper()
+    if name_upper in FUND_NAMES:
+        try:
+            total = parse_amount(parts[2])
+        except (ValueError, TypeError):
+            bot.reply_to(message, "Số tiền không hợp lệ. VD: 10000000, 10tr")
+            return
+        desc = f"Mua {name_upper}"
+        tid = add_transaction(uid, -total, "investment", desc, is_asset=1)
+        aid = add_asset(uid, tid, name_upper, total, 1)
+        conn = get_db()
+        conn.execute("UPDATE assets SET ticker = ? WHERE id = ?", (name_upper, aid))
+        conn.commit()
+        conn.close()
+        try:
+            sync_asset_to_gsheet({"name": name_upper, "value": total, "note": desc}, is_buy=True)
+        except Exception as e:
+            logger.warning(f"GSheet buy sync error: {e}")
+        bot.reply_to(message, f"✅ Mua {name_upper} {total:,.0f} VND.")
+    else:
+        if len(parts) < 4:
+            bot.reply_to(message, "/buy <name> <qty> <price>\n/buy VNM 100 65000")
+            return
+        try:
+            qty = float(parts[2])
+            price = parse_amount(parts[3])
+            total = qty * price
+        except (ValueError, TypeError):
+            bot.reply_to(message, "Invalid quantity or price.")
+            return
+        desc = f"Buy {qty} {name} @ {price}"
+        tid = add_transaction(uid, -total, "investment", desc, is_asset=1)
+        aid = add_asset(uid, tid, name, total, 1)
+        try:
+            sync_asset_to_gsheet({"name": name, "value": total, "note": desc}, is_buy=True)
+        except Exception as e:
+            logger.warning(f"GSheet buy sync error: {e}")
+        bot.reply_to(message, f"✅ Bought {qty} {name} for {total:,.0f} VND.")
 
 @bot.message_handler(commands=["sell"])
 def cmd_sell(message: Message):
+    """Bán chứng chỉ quỹ theo tên: /sell DCDS 5000000"""
     if not is_admin(message.from_user.id):
         return
-    bot.reply_to(message, "Use /liquidate <asset_id> <sell_price>")
+    uid = message.from_user.id
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 3:
+        bot.reply_to(message, "/sell <name> <amount>\n  /sell DCDS 5000000\n  /sell VNM 5000000")
+        return
+    name = parts[1]
+    try:
+        value = parse_amount(parts[2])
+    except (ValueError, TypeError):
+        bot.reply_to(message, "Số tiền không hợp lệ.")
+        return
+    assets = get_assets(uid, active_only=True)
+    target = None
+    for a in assets:
+        if a["name"].upper() == name.upper():
+            target = a
+            break
+    if not target:
+        bot.reply_to(message, f"Không tìm thấy tài sản \"{name}\".")
+        return
+    result = liquidate_asset(target["id"], value)
+    if not result:
+        bot.reply_to(message, "Không thể bán tài sản này.")
+        return
+    try:
+        sync_asset_to_gsheet({
+            "name": target["name"],
+            "value": value,
+            "note": f"Bán {target['name']}"
+        }, is_buy=False)
+    except Exception as e:
+        logger.warning(f"GSheet sell sync error: {e}")
+    bot.reply_to(message,
+        f"✅ Sold {result['asset_name']} for {result['sell_price']:,.0f} VND.\n"
+        f"Book value: {result['remaining_value']:,.0f}\n"
+        f"Gain/Loss: {result['gain_loss']:+,.0f}")
 
 @bot.message_handler(commands=["ping"])
 def cmd_ping(message: Message):
