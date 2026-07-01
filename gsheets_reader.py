@@ -146,8 +146,7 @@ def sync_portfolio_to_sqlite(data, user_id=0):
     for row in data:
         try:
             name = row.get("Tài sản", "").strip()
-            value_str = row.get("Giá trị", "0").replace(",", "").replace(" ", "")
-            value = float(value_str) if value_str else 0
+            value = parse_sheet_amount(row.get("Giá trị", "0"))
             trans_type = row.get("Loại GD", "").strip().lower()
             if not name or value <= 0:
                 skipped += 1
