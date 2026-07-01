@@ -16,7 +16,7 @@ from database import (
 )
 from asset_manager import get_asset_summary, liquidate_asset
 from finance_logic import get_balance, get_monthly_summary, get_category_breakdown, get_all_bank_balances
-from gsheets_reader import sync_all_from_sheets, full_sync_from_sheets, read_expenses_from_sheet, read_portfolio_from_sheet
+from gsheets_reader import sync_all_from_sheets, full_sync_from_sheets, read_expenses_from_sheet, read_portfolio_from_sheet, sync_portfolio_to_sqlite
 from gsheets_sync import sync_expense_to_gsheet, sync_transfer_to_gsheet, sync_asset_to_gsheet
 from simulation import run_monte_carlo, generate_projection_chart
 from nav_fetcher import fetch_nav_from_vnsignal, update_asset_nav, refresh_all_assets
@@ -211,6 +211,7 @@ def cmd_help(message: Message):
         "  `/export` — xuất file Excel\n"
         "  `/sync` — đồng bộ từ Google Sheets\n"
         "  `/fullsync` — xóa SQLite và import lại từ Google Sheets\n"
+        "  `/sync_portfolio` — xóa assets cũ, import lại My Portfolio từ sheet\n"
         "  `/web` — link Web Dashboard\n\n"
         "🔧 *Debug:*\n"
         "  `/ping` `/dbcheck` `/gscheck` `/envcheck` `/logs` `/navtest` `/webhook_info`\n\n"
@@ -555,7 +556,17 @@ def _finish_buy(uid, name, total, desc, bank=None):
     try:
         sync_asset_to_gsheet({"name": name, "value": total, "note": desc}, is_buy=True)
     except Exception as e:
-        logger.warning(f"GSheet buy sync error: {e}")
+        logger.warning(f"GSheet buy (portfolio) sync error: {e}")
+    try:
+        sync_expense_to_gsheet({
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "amount": -total,
+            "category": "investment",
+            "description": desc,
+            "bank_account": bank or "",
+        })
+    except Exception as e:
+        logger.warning(f"GSheet buy (expense) sync error: {e}")
     if bank:
         bot.send_message(uid, f"✅ Mua {name} {total:,.0f} VND từ {bank}.")
     else:
@@ -829,7 +840,36 @@ def handle_main_message(message: Message):
                 f"Transfers: {t['imported']} imported, {t['skipped']} skipped",
                 f"Portfolio: {p['imported']} imported, {p['skipped']} skipped",
             ]
-            bot.edit_message_text("\n".join(lines), msg.chat.id, msg.message_id, parse_mode="Markdown")
+    bot.edit_message_text("\n".join(lines), msg.chat.id, msg.message_id, parse_mode="Markdown")
+
+@bot.message_handler(commands=["sync_portfolio"])
+def cmd_sync_portfolio(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    uid = message.from_user.id
+    msg = bot.reply_to(message, "Syncing portfolio from Google Sheets...")
+    try:
+        data, err = read_portfolio_from_sheet()
+        if err:
+            bot.edit_message_text(f"❌ {err}", msg.chat.id, msg.message_id)
+            return
+        if not data:
+            bot.edit_message_text("No portfolio data in sheet.", msg.chat.id, msg.message_id)
+            return
+        conn = get_db()
+        conn.execute("DELETE FROM assets WHERE user_id = ?", (uid,))
+        conn.execute("DELETE FROM transactions WHERE user_id = ? AND is_asset = 1", (uid,))
+        conn.commit()
+        conn.close()
+        imported, skipped = sync_portfolio_to_sqlite(data, uid)
+        bot.edit_message_text(
+            f"✅ Portfolio synced.\n"
+            f"Imported: {imported}\n"
+            f"Skipped: {skipped}",
+            msg.chat.id, msg.message_id)
+    except Exception as e:
+        logger.error(f"sync_portfolio error: {e}")
+        bot.edit_message_text(f"❌ Error: {e}", msg.chat.id, msg.message_id)
         except Exception as e:
             logger.error(f"fullsync error: {e}")
             bot.edit_message_text(f"❌ Full sync failed: {e}", msg.chat.id, msg.message_id)
