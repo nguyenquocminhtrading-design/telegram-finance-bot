@@ -194,15 +194,15 @@ def cmd_help(message: Message):
         "💳 *Tài khoản hỗ trợ:*\n"
         "  `VCB` · `ACB` · `HDBANK` · `CASH` · `MOMO`\n\n"
         "💰 *Số dư & Báo cáo:*\n"
-        "  `/balance` — tổng số dư\n"
+        "  `/balance` — tổng số dư (Các Bank + Danh mục đầu tư)\n"
         "  `/bankbalance` — số dư từng tài khoản\n"
         "  `/report` — báo cáo tháng (thu, chi, phân loại)\n"
         "  `/setbalance <bank> <amount>` — đặt số dư ban đầu\n\n"
         "📦 *Tài sản:*\n"
         "  `/asset` — danh mục tài sản\n"
-        "  `/buy DCDS 10000000 VCB` — mua quỹ (thêm bank để trừ tiền)\n"
-        "  `/buy VNM 100 65000 VCB` — mua cổ phiếu (có bank optional)\n"
-        "  `/sell DCDS 5000000 VCB` — bán theo tên, tiền về bank\n"
+        "  `/buy DCDS 10000000 VCB` — mua tài sản (tự cập nhật Expense & Portfolio sheet)\n"
+        "  `/buy VNM 100 65000 VCB` — mua cổ phiếu\n"
+        "  `/sell DCDS 5000000 VCB` — bán tài sản (tiền về bank, cập nhật sheet)\n"
         "  `/liquidate 3 7000000 VCB` — thanh lý theo ID + bank\n"
         "  `/nav <id> [ticker]` — cập nhật NAV quỹ\n"
         "  `/refresh` — refresh NAV tất cả tài sản\n\n"
@@ -521,7 +521,27 @@ def cmd_liquidate(message: Message):
         conn.execute("UPDATE transactions SET bank_account = ? WHERE id = ?", (bank, tid))
         conn.commit()
         conn.close()
+        try:
+            sync_expense_to_gsheet({
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "amount": price,
+                "category": "asset_liquidation",
+                "description": f"Liquidate {result['asset_name']}",
+                "bank_account": bank,
+            })
+        except Exception as e:
+            logger.warning(f"GSheet liquidate (income) sync error: {e}")
     elif tid and not bank:
+        try:
+            sync_expense_to_gsheet({
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "amount": price,
+                "category": "asset_liquidation",
+                "description": f"Liquidate {result['asset_name']}",
+                "bank_account": "",
+            })
+        except Exception as e:
+            logger.warning(f"GSheet liquidate (income) sync error: {e}")
         save_state(uid, {"pending_invest_bank": {"tid": tid, "money_out": -price}})
     msg = (f"Liquidated {result['asset_name']}.\n"
            f"Sold: {result['sell_price']:,.0f}\n"
@@ -666,10 +686,30 @@ def cmd_sell(message: Message):
         conn.execute("UPDATE transactions SET bank_account = ? WHERE id = ?", (bank, tid))
         conn.commit()
         conn.close()
+        try:
+            sync_expense_to_gsheet({
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "amount": result['sell_price'],
+                "category": "asset_liquidation",
+                "description": f"Bán {target['name']}",
+                "bank_account": bank,
+            })
+        except Exception as e:
+            logger.warning(f"GSheet sell (income) sync error: {e}")
         bot.reply_to(message,
             f"✅ Sold {result['asset_name']} for {result['sell_price']:,.0f} VND.\n"
             f"Tiền về {bank} | Gain/Loss: {result['gain_loss']:+,.0f}")
     elif tid:
+        try:
+            sync_expense_to_gsheet({
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "amount": result['sell_price'],
+                "category": "asset_liquidation",
+                "description": f"Bán {target['name']}",
+                "bank_account": "",
+            })
+        except Exception as e:
+            logger.warning(f"GSheet sell (income) sync error: {e}")
         save_state(uid, {"pending_invest_bank": {"tid": tid, "money_out": -value}})
         bot.reply_to(message,
             f"✅ Sold {result['asset_name']} for {result['sell_price']:,.0f} VND.\n"

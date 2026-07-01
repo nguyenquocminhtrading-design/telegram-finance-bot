@@ -287,38 +287,6 @@ def sync_expenses_to_sqlite(data, user_id=0):
     return imported, skipped
 
 
-def sync_portfolio_to_sqlite(data, user_id=0):
-    imported = 0
-    skipped = 0
-    conn = get_db()
-    existing_assets = set()
-    for r in conn.execute(
-        "SELECT name, original_value FROM assets WHERE user_id = ?",
-        (user_id,),
-    ).fetchall():
-        existing_assets.add((r["name"], r["original_value"]))
-    conn.close()
-
-    for row in data:
-        try:
-            name = row.get("TÃ i sáº£n", "").strip()
-            value = parse_sheet_amount(row.get("GiÃ¡ trá»‹", "0"))
-            trans_type = row.get("Loáº¡i GD", "").strip().lower()
-            if not name or value <= 0:
-                skipped += 1
-                continue
-            if (name, value) in existing_assets:
-                skipped += 1
-                continue
-            if trans_type in ("mua", "buy"):
-                tid = add_transaction(user_id, -value, "investment", f"Buy {name}", is_asset=1)
-                add_asset(user_id, tid, name, value, 12)
-                imported += 1
-        except (ValueError, KeyError):
-            skipped += 1
-    return imported, skipped
-
-
 def sync_transfers_to_sqlite(data, user_id=0):
     imported = 0
     skipped = 0
