@@ -200,10 +200,10 @@ def cmd_help(message: Message):
         "  `/setbalance <bank> <amount>` — đặt số dư ban đầu\n\n"
         "📦 *Tài sản:*\n"
         "  `/asset` — danh mục tài sản\n"
-        "  `/buy DCDS 10000000` — mua chứng chỉ quỹ (chỉ giá trị)\n"
-        "  `/buy VNM 100 65000` — mua cổ phiếu (qty × giá)\n"
-        "  `/sell DCDS 5000000` — bán theo tên (không cần ID)\n"
-        "  `/liquidate <id> <giá>` — bán / thanh lý theo ID\n"
+        "  `/buy DCDS 10000000 VCB` — mua quỹ (thêm bank để trừ tiền)\n"
+        "  `/buy VNM 100 65000 VCB` — mua cổ phiếu (có bank optional)\n"
+        "  `/sell DCDS 5000000 VCB` — bán theo tên, tiền về bank\n"
+        "  `/liquidate 3 7000000 VCB` — thanh lý theo ID + bank\n"
         "  `/nav <id> [ticker]` — cập nhật NAV quỹ\n"
         "  `/refresh` — refresh NAV tất cả tài sản\n\n"
         "📊 *Công cụ:*\n"
@@ -272,7 +272,20 @@ def cmd_balance(message: Message):
     for bank, bal in balances.items():
         lines.append(f"  {bank}: `{bal:+,.0f}` VND")
     lines.append("")
-    lines.append(f"  *TOTAL: `{total:+,.0f}` VND*")
+    lines.append(f"  *Tổng bank: `{total:+,.0f}` VND*")
+    summary = get_asset_summary(uid)
+    if summary["active_count"] > 0:
+        lines.append("")
+        lines.append("📈 *DANH MỤC ĐẦU TƯ:*")
+        lines.append("")
+        for a in summary["assets"]:
+            if a["is_active"]:
+                lines.append(f"  {a['name']}: `{a['current_value']:+,.0f}` VND")
+        lines.append("")
+        lines.append(f"  *Tổng đầu tư: `{summary['total_current']:+,.0f}` VND*")
+        grand_total = total + summary["total_current"]
+        lines.append("")
+        lines.append(f"💎 *TỔNG TÀI SẢN: `{grand_total:+,.0f}` VND*")
     bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
 
 @bot.message_handler(commands=["report"])
@@ -464,9 +477,10 @@ def cmd_project(message: Message):
 def cmd_liquidate(message: Message):
     if not is_admin(message.from_user.id):
         return
+    uid = message.from_user.id
     parts = message.text.split()
     if len(parts) < 3:
-        bot.reply_to(message, "/liquidate <asset_id> <sell_price>")
+        bot.reply_to(message, "/liquidate <asset_id> <sell_price> [bank]")
         return
     try:
         aid = int(parts[1])
@@ -486,11 +500,24 @@ def cmd_liquidate(message: Message):
         }, is_buy=False)
     except Exception as e:
         logger.warning(f"GSheet liquidate sync error: {e}")
-    bot.reply_to(message,
-        f"Liquidated {result['asset_name']}.\n"
-        f"Sold: {result['sell_price']:,.0f}\n"
-        f"Book value: {result['remaining_value']:,.0f}\n"
-        f"Gain/Loss: {result['gain_loss']:+,.0f}")
+    bank = resolve_bank_text(parts[3]) if len(parts) >= 4 else None
+    tid = result.get("transaction_id")
+    if bank and tid:
+        conn = get_db()
+        conn.execute("UPDATE transactions SET bank_account = ? WHERE id = ?", (bank, tid))
+        conn.commit()
+        conn.close()
+    elif tid and not bank:
+        save_state(uid, {"pending_invest_bank": {"tid": tid, "money_out": -price}})
+    msg = (f"Liquidated {result['asset_name']}.\n"
+           f"Sold: {result['sell_price']:,.0f}\n"
+           f"Book value: {result['remaining_value']:,.0f}\n"
+           f"Gain/Loss: {result['gain_loss']:+,.0f}")
+    if not bank:
+        msg += f"\nVào tài khoản? ({BANK_LIST_STR})"
+    else:
+        msg += f"\nTiền về {bank}."
+    bot.reply_to(message, msg)
 
 @bot.message_handler(commands=["export"])
 def cmd_export(message: Message):
@@ -518,17 +545,35 @@ def cmd_export(message: Message):
 
 FUND_NAMES = {"DCDS", "DCDE", "DCBF", "DCIP", "E1VFVN30", "FUEVFVND", "FUESSVFL"}
 
+def _finish_buy(uid, name, total, desc, bank=None):
+    tid = add_transaction(uid, -total, "investment", desc, is_asset=1, bank_account=bank or "")
+    aid = add_asset(uid, tid, name, total, 1)
+    conn = get_db()
+    conn.execute("UPDATE assets SET ticker = ? WHERE id = ?", (name if name.upper() in FUND_NAMES else "", aid))
+    conn.commit()
+    conn.close()
+    try:
+        sync_asset_to_gsheet({"name": name, "value": total, "note": desc}, is_buy=True)
+    except Exception as e:
+        logger.warning(f"GSheet buy sync error: {e}")
+    if bank:
+        bot.send_message(uid, f"✅ Mua {name} {total:,.0f} VND từ {bank}.")
+    else:
+        save_state(uid, {"pending_invest_bank": {"tid": tid, "money_out": total}})
+        bot.send_message(uid, f"✅ Mua {name} {total:,.0f} VND.\nTừ tài khoản? ({BANK_LIST_STR})")
+
 @bot.message_handler(commands=["buy"])
 def cmd_buy(message: Message):
     if not is_admin(message.from_user.id):
         return
     uid = message.from_user.id
-    parts = message.text.split(maxsplit=3)
+    parts = message.text.split()
     if len(parts) < 3:
         bot.reply_to(
             message,
-            "/buy DCDS 10000000  (chứng chỉ quỹ)\n"
-            "/buy VNM 100 65000  (cổ phiếu)")
+            "/buy DCDS 10000000 [bank]  (chứng chỉ quỹ)\n"
+            "/buy VNM 100 65000 [bank]  (cổ phiếu)\n"
+            "VD: /buy DCDS 10tr VCB")
         return
     name = parts[1]
     name_upper = name.upper()
@@ -538,21 +583,11 @@ def cmd_buy(message: Message):
         except (ValueError, TypeError):
             bot.reply_to(message, "Số tiền không hợp lệ. VD: 10000000, 10tr")
             return
-        desc = f"Mua {name_upper}"
-        tid = add_transaction(uid, -total, "investment", desc, is_asset=1)
-        aid = add_asset(uid, tid, name_upper, total, 1)
-        conn = get_db()
-        conn.execute("UPDATE assets SET ticker = ? WHERE id = ?", (name_upper, aid))
-        conn.commit()
-        conn.close()
-        try:
-            sync_asset_to_gsheet({"name": name_upper, "value": total, "note": desc}, is_buy=True)
-        except Exception as e:
-            logger.warning(f"GSheet buy sync error: {e}")
-        bot.reply_to(message, f"✅ Mua {name_upper} {total:,.0f} VND.")
+        bank = resolve_bank_text(parts[3]) if len(parts) >= 4 else None
+        _finish_buy(uid, name_upper, total, f"Mua {name_upper}", bank)
     else:
         if len(parts) < 4:
-            bot.reply_to(message, "/buy <name> <qty> <price>\n/buy VNM 100 65000")
+            bot.reply_to(message, "/buy <name> <qty> <price> [bank]\n/buy VNM 100 65000 VCB")
             return
         try:
             qty = float(parts[2])
@@ -561,24 +596,17 @@ def cmd_buy(message: Message):
         except (ValueError, TypeError):
             bot.reply_to(message, "Invalid quantity or price.")
             return
-        desc = f"Buy {qty} {name} @ {price}"
-        tid = add_transaction(uid, -total, "investment", desc, is_asset=1)
-        aid = add_asset(uid, tid, name, total, 1)
-        try:
-            sync_asset_to_gsheet({"name": name, "value": total, "note": desc}, is_buy=True)
-        except Exception as e:
-            logger.warning(f"GSheet buy sync error: {e}")
-        bot.reply_to(message, f"✅ Bought {qty} {name} for {total:,.0f} VND.")
+        bank = resolve_bank_text(parts[4]) if len(parts) >= 5 else None
+        _finish_buy(uid, name, total, f"Buy {qty} {name} @ {price}", bank)
 
 @bot.message_handler(commands=["sell"])
 def cmd_sell(message: Message):
-    """Bán chứng chỉ quỹ theo tên: /sell DCDS 5000000"""
     if not is_admin(message.from_user.id):
         return
     uid = message.from_user.id
-    parts = message.text.split(maxsplit=2)
+    parts = message.text.split()
     if len(parts) < 3:
-        bot.reply_to(message, "/sell <name> <amount>\n  /sell DCDS 5000000\n  /sell VNM 5000000")
+        bot.reply_to(message, "/sell <name> <amount> [bank]\n  /sell DCDS 5000000 VCB\n  /sell VNM 5000000")
         return
     name = parts[1]
     try:
@@ -607,10 +635,22 @@ def cmd_sell(message: Message):
         }, is_buy=False)
     except Exception as e:
         logger.warning(f"GSheet sell sync error: {e}")
-    bot.reply_to(message,
-        f"✅ Sold {result['asset_name']} for {result['sell_price']:,.0f} VND.\n"
-        f"Book value: {result['remaining_value']:,.0f}\n"
-        f"Gain/Loss: {result['gain_loss']:+,.0f}")
+    bank = resolve_bank_text(parts[3]) if len(parts) >= 4 else None
+    tid = result.get("transaction_id")
+    if bank and tid:
+        conn = get_db()
+        conn.execute("UPDATE transactions SET bank_account = ? WHERE id = ?", (bank, tid))
+        conn.commit()
+        conn.close()
+        bot.reply_to(message,
+            f"✅ Sold {result['asset_name']} for {result['sell_price']:,.0f} VND.\n"
+            f"Tiền về {bank} | Gain/Loss: {result['gain_loss']:+,.0f}")
+    elif tid:
+        save_state(uid, {"pending_invest_bank": {"tid": tid, "money_out": -value}})
+        bot.reply_to(message,
+            f"✅ Sold {result['asset_name']} for {result['sell_price']:,.0f} VND.\n"
+            f"Gain/Loss: {result['gain_loss']:+,.0f}\n"
+            f"Vào tài khoản? ({BANK_LIST_STR})")
 
 @bot.message_handler(commands=["ping"])
 def cmd_ping(message: Message):
@@ -844,6 +884,22 @@ def handle_main_message(message: Message):
             except Exception as e:
                 logger.error(f"transfer step error: {e}")
                 bot.reply_to(message, f"❌ Lỗi khi chuyển: {e}")
+        return
+
+    # --- State: pending_invest_bank (user trả lời bank cho buy/sell/liquidate) ---
+    if "pending_invest_bank" in loaded:
+        bank = resolve_bank_text(text)
+        if not bank:
+            bot.reply_to(message, f"❌ Không nhận ra tài khoản \"{text}\". Thử lại: {BANK_LIST_STR}")
+            return
+        state = loaded["pending_invest_bank"]
+        conn = get_db()
+        conn.execute("UPDATE transactions SET bank_account = ? WHERE id = ?", (bank, state["tid"]))
+        conn.commit()
+        conn.close()
+        clear_state(uid)
+        bal = get_balance(uid)
+        bot.reply_to(message, f"✅ Cập nhật bank: {bank} | Balance: {bal:,.0f} VND")
         return
 
     # --- State: pending_capitalize_decision (user typing yes/no) ---
