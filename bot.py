@@ -433,22 +433,6 @@ def cmd_fullsync(message: Message):
         parse_mode="Markdown"
     )
     return
-    msg = bot.reply_to(
-        message,
-        "Full sync starting...\n"
-        "This will clear SQLite data for your user and import again from Google Sheets."
-    )
-    results = full_sync_from_sheets(message.from_user.id)
-    e = results["expenses"]
-    t = results["transfers"]
-    p = results["portfolio"]
-    lines = [
-        "✅ *Full sync complete*",
-        f"Expenses: {e['imported']} imported, {e['skipped']} skipped",
-        f"Transfers: {t['imported']} imported, {t['skipped']} skipped",
-        f"Portfolio: {p['imported']} imported, {p['skipped']} skipped",
-    ]
-    bot.edit_message_text("\n".join(lines), msg.chat.id, msg.message_id, parse_mode="Markdown")
 
 @bot.message_handler(commands=["project", "montecarlo"])
 def cmd_project(message: Message):
@@ -840,7 +824,11 @@ def handle_main_message(message: Message):
                 f"Transfers: {t['imported']} imported, {t['skipped']} skipped",
                 f"Portfolio: {p['imported']} imported, {p['skipped']} skipped",
             ]
-    bot.edit_message_text("\n".join(lines), msg.chat.id, msg.message_id, parse_mode="Markdown")
+            bot.edit_message_text("\n".join(lines), msg.chat.id, msg.message_id, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"fullsync error: {e}")
+            bot.edit_message_text(f"❌ Full sync failed: {e}", msg.chat.id, msg.message_id)
+        return
 
 @bot.message_handler(commands=["sync_portfolio"])
 def cmd_sync_portfolio(message: Message):
